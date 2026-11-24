@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { PayrollPeriodDto, PayrollSlipDto } from "@sims/shared";
 import { ApiClientError, api } from "../lib/api.ts";
 import { useSchoolScope } from "../lib/school.tsx";
@@ -46,6 +46,7 @@ export function PayrollPage({ mode }: { mode: "admin" | "employee" }) {
 
   const [loading, setLoading] = useState<boolean>(false);
   const [busyAction, setBusyAction] = useState<string | null>(null);
+  const actionLock = useRef(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
 
@@ -54,7 +55,7 @@ export function PayrollPage({ mode }: { mode: "admin" | "employee" }) {
     setLoading(true);
     setError(null);
     try {
-      const data = await api<PayrollPeriodDto[]>(`/schools/${schoolId}/payroll/periods`);
+      const data = await api<PayrollPeriodDto[]>(`/api/v1/schools/${schoolId}/payroll/periods`);
       setPeriods(data);
       const firstPeriod = data[0];
       if (firstPeriod && !selectedPeriodId) {
@@ -70,7 +71,7 @@ export function PayrollPage({ mode }: { mode: "admin" | "employee" }) {
   const loadSlipsForPeriod = useCallback(async (periodId: string) => {
     if (!schoolId || !periodId || mode !== "admin") return;
     try {
-      const data = await api<PayrollSlipDto[]>(`/schools/${schoolId}/payroll/periods/${periodId}/slips`);
+      const data = await api<PayrollSlipDto[]>(`/api/v1/schools/${schoolId}/payroll/periods/${periodId}/slips`);
       setSlips(data);
     } catch (err) {
       setError(err instanceof ApiClientError ? err.message : "Gagal memuat daftar slip gaji.");
@@ -82,7 +83,7 @@ export function PayrollPage({ mode }: { mode: "admin" | "employee" }) {
     setLoading(true);
     setError(null);
     try {
-      const data = await api<PayrollSlipDto[]>(`/schools/${schoolId}/payroll/my-slips`);
+      const data = await api<PayrollSlipDto[]>(`/api/v1/schools/${schoolId}/payroll/my-slips`);
       setMySlips(data);
       const firstSlip = data[0];
       if (firstSlip) {
@@ -113,12 +114,21 @@ export function PayrollPage({ mode }: { mode: "admin" | "employee" }) {
 
   async function handleCreatePeriod(e: React.FormEvent) {
     e.preventDefault();
-    if (!schoolId) return;
+    if (!schoolId || actionLock.current) return;
+    if (!Number.isInteger(month) || month < 1 || month > 12 || !Number.isInteger(year) || year < 2020 || year > 2100) {
+      setError("Bulan dan tahun periode tidak valid.");
+      return;
+    }
+    if (!Number.isInteger(ratePerJtm) || ratePerJtm < 0 || !Number.isInteger(ratePerHadir) || ratePerHadir < 0) {
+      setError("Tarif honor harus bilangan bulat dan tidak negatif.");
+      return;
+    }
+    actionLock.current = true;
     setBusyAction("create-period");
     setError(null);
     setSuccess(null);
     try {
-      const created = await api<PayrollPeriodDto>(`/schools/${schoolId}/payroll/periods`, {
+      const created = await api<PayrollPeriodDto>(`/api/v1/schools/${schoolId}/payroll/periods`, {
         method: "POST",
         body: JSON.stringify({
           month,
@@ -135,18 +145,20 @@ export function PayrollPage({ mode }: { mode: "admin" | "employee" }) {
     } catch (err) {
       setError(err instanceof ApiClientError ? err.message : "Gagal membuat periode gaji.");
     } finally {
+      actionLock.current = false;
       setBusyAction(null);
     }
   }
 
   async function handleGenerateSlips() {
-    if (!schoolId || !selectedPeriodId) return;
+    if (!schoolId || !selectedPeriodId || actionLock.current) return;
+    actionLock.current = true;
     setBusyAction("generate-slips");
     setError(null);
     setSuccess(null);
     try {
       const generated = await api<PayrollSlipDto[]>(
-        `/schools/${schoolId}/payroll/periods/${selectedPeriodId}/generate`,
+        `/api/v1/schools/${schoolId}/payroll/periods/${selectedPeriodId}/generate`,
         { method: "POST" }
       );
       setSlips(generated);
@@ -155,6 +167,7 @@ export function PayrollPage({ mode }: { mode: "admin" | "employee" }) {
     } catch (err) {
       setError(err instanceof ApiClientError ? err.message : "Gagal menghitung slip gaji.");
     } finally {
+      actionLock.current = false;
       setBusyAction(null);
     }
   }
@@ -165,7 +178,7 @@ export function PayrollPage({ mode }: { mode: "admin" | "employee" }) {
     setError(null);
     setSuccess(null);
     try {
-      await api<PayrollSlipDto>(`/schools/${schoolId}/payroll/slips/${slipId}`, {
+      await api<PayrollSlipDto>(`/api/v1/schools/${schoolId}/payroll/slips/${slipId}`, {
         method: "PATCH",
         body: JSON.stringify({ status }),
       });

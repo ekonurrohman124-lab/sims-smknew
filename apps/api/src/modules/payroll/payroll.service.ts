@@ -155,6 +155,10 @@ export async function generatePeriodSlips(
   if (!period) {
     throw new AppError(404, "PAYROLL_PERIOD_NOT_FOUND", "Periode gaji tidak ditemukan.");
   }
+  const existingSlips = await prisma.payrollSlip.count({ where: { periodId: period.id, schoolId } });
+  if (existingSlips > 0) {
+    throw new AppError(409, "PAYROLL_ALREADY_GENERATED", "Slip periode ini sudah dihitung. Generate ulang tidak dijalankan.");
+  }
 
   const startDate = new Date(Date.UTC(period.year, period.month - 1, 1));
   const endDate = new Date(Date.UTC(period.year, period.month, 1));

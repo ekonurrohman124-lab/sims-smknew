@@ -9,6 +9,8 @@ export type PageQuery = {
   q?: string;
   page: number;
   pageSize: 10 | 25 | 50;
+  classId?: string;
+  concentrationId?: string;
 };
 
 export function toDateOnly(value: Date): string {

@@ -74,6 +74,12 @@ function ComponentPicker({
   );
 }
 
+function gradeComponentLocked(sheet: GradeSheetDto, key: string): boolean {
+  if (sheet.legacyLock) return true;
+  const component = sheet.components.find((item) => item.key === key);
+  return Boolean(component && (component.locked || component.status !== "DRAFT"));
+}
+
 function formatScore(value: number | null): string {
   if (value === null) return "";
   return String(value).replace(".", ",");
@@ -379,25 +385,45 @@ export function GradePage() {
       }
 
       let appliedCells = 0;
+      let skippedLocked = 0;
+      let rejectedCells = 0;
       for (const col of chosen) {
+        const entries = Object.entries(col.values);
         if (col.category === "formative" && col.tpCode) {
           const targetObj = currentSheet.formative.find((f) => f.code.trim().toUpperCase() === col.tpCode!.toUpperCase());
-          if (!targetObj) continue;
-          for (const [studentId, val] of Object.entries(col.values)) {
+          if (!targetObj) {
+            rejectedCells += entries.length;
+            continue;
+          }
+          if (gradeComponentLocked(currentSheet, `f:${col.field}:${targetObj.learningObjectiveId}`)) {
+            skippedLocked += entries.length;
+            continue;
+          }
+          for (const [studentId, val] of entries) {
             nextFormative[`${targetObj.learningObjectiveId}:${studentId}:${col.field}`] = val;
             appliedCells += 1;
           }
         } else if (col.category === "summative" && currentSheet.summative[0]) {
           const targetScope = currentSheet.summative[0];
-          for (const [studentId, val] of Object.entries(col.values)) {
+          if (gradeComponentLocked(currentSheet, `s:${targetScope.materialScopeId}`)) {
+            skippedLocked += entries.length;
+            continue;
+          }
+          for (const [studentId, val] of entries) {
             nextSummative[`${targetScope.materialScopeId}:${studentId}:score`] = val;
             appliedCells += 1;
           }
         } else if (col.category === "term") {
-          for (const [studentId, val] of Object.entries(col.values)) {
+          if (gradeComponentLocked(currentSheet, col.field)) {
+            skippedLocked += entries.length;
+            continue;
+          }
+          for (const [studentId, val] of entries) {
             nextTerm[`${studentId}:${col.field}`] = val;
             appliedCells += 1;
           }
+        } else {
+          rejectedCells += entries.length;
         }
       }
 
@@ -427,8 +453,12 @@ export function GradePage() {
         if (firstTp) setObjectiveId(firstTp.learningObjectiveId);
       }
 
+      const skipped = (importData?.stats.skippedEmpty ?? 0) + skippedLocked;
+      const failed = (importData?.stats.rejectedInvalid ?? 0) + (importData?.stats.unmatchedNames.length ?? 0) + rejectedCells;
+      const summary = `Impor nilai: berhasil ${appliedCells}, dilewati ${skipped}, gagal ${failed}.`;
       setSaveFailed(false);
-      setMessage(`Impor selesai: ${chosen.length} kolom (${appliedCells} nilai) otomatis tersimpan ke server.`);
+      if (failed > 0) setError(summary);
+      else setMessage(summary);
       setDialog(null);
     } catch (caught) {
       setError(caught instanceof ApiClientError ? caught.message : "Gagal menyimpan impor otomatis.");

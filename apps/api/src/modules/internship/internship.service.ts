@@ -2,9 +2,52 @@ import type { PrismaClient } from "@prisma/client";
 import { writeAudit } from "../../lib/audit.ts";
 import type { AuthState } from "../../lib/auth-state.ts";
 import { AppError } from "../../lib/errors.ts";
-import { assertSchoolAccess, assertSchoolRole, type RequestMeta } from "../../lib/tenant.ts";
+import { assertSchoolRole, type RequestMeta } from "../../lib/tenant.ts";
 
-const INTERNSHIP_SUPERVISOR_ROLES = ["ADMIN_SEKOLAH", "KEPALA_SEKOLAH", "WAKAKUR", "GURU_MAPEL", "WALI_KELAS", "TU"] as const;
+const PKL_BROAD_ROLES = ["ADMIN_SEKOLAH", "KEPALA_SEKOLAH", "WAKAKUR", "TU", "WAKA_KESISWAAN", "WAKA_HUMAS", "KAPROG"] as const;
+
+async function internshipScope(
+  prisma: PrismaClient,
+  auth: AuthState,
+  schoolId: string,
+  meta: RequestMeta,
+  write: boolean,
+): Promise<{ all: true } | { all: false; studentIds: string[] }> {
+  const broad =
+    auth.isSystemOwner ||
+    auth.assignments.some(
+      (assignment) => assignment.schoolId === schoolId && PKL_BROAD_ROLES.includes(assignment.roleCode as (typeof PKL_BROAD_ROLES)[number]),
+    );
+  if (broad) return { all: true };
+
+  const isHomeroom = auth.assignments.some((assignment) => assignment.schoolId === schoolId && assignment.roleCode === "WALI_KELAS");
+  if (isHomeroom) {
+    const teacher = await prisma.teacher.findFirst({ where: { schoolId, userId: auth.userId }, select: { id: true } });
+    const rooms = teacher
+      ? await prisma.homeroomAssignment.findMany({ where: { schoolId, teacherId: teacher.id }, select: { classId: true } })
+      : [];
+    const classIds = rooms.map((room) => room.classId);
+    const students = classIds.length === 0
+      ? []
+      : await prisma.student.findMany({ where: { schoolId, classId: { in: classIds } }, select: { id: true } });
+    return { all: false, studentIds: students.map((student) => student.id) };
+  }
+
+  if (!write) {
+    const links = await prisma.parentStudentLink.findMany({
+      where: { schoolId, parentUserId: auth.userId },
+      select: { studentId: true },
+    });
+    if (links.length > 0) return { all: false, studentIds: links.map((link) => link.studentId) };
+  }
+
+  await assertSchoolRole(prisma, auth, schoolId, PKL_BROAD_ROLES, meta);
+  return { all: true };
+}
+
+function placementFilter(scope: { all: true } | { all: false; studentIds: string[] }) {
+  return scope.all ? {} : { studentId: { in: scope.studentIds } };
+}
 
 export async function listInternshipPlacements(
   prisma: PrismaClient,
@@ -12,23 +55,13 @@ export async function listInternshipPlacements(
   schoolId: string,
   meta: RequestMeta,
 ) {
-  await assertSchoolAccess(prisma, auth, schoolId, meta);
-  const canManageAll =
-    auth.isSystemOwner ||
-    auth.assignments.some(
-      (a) => a.schoolId === schoolId && INTERNSHIP_SUPERVISOR_ROLES.includes(a.roleCode as (typeof INTERNSHIP_SUPERVISOR_ROLES)[number]),
-    );
-
-  const linkedStudents = await prisma.parentStudentLink.findMany({
-    where: { schoolId, parentUserId: auth.userId },
-    select: { studentId: true },
-  });
-  const linkedIds = linkedStudents.map((l) => l.studentId);
+  const scope = await internshipScope(prisma, auth, schoolId, meta, false);
+  const canManageAll = scope.all;
 
   const placements = await prisma.internshipPlacement.findMany({
     where: {
       schoolId,
-      ...(canManageAll ? {} : { studentId: { in: linkedIds.length > 0 ? linkedIds : ["__none__"] } }),
+      ...placementFilter(scope),
     },
     include: {
       student: {
@@ -61,14 +94,16 @@ export async function createInternshipPlacement(
   },
   meta: RequestMeta,
 ) {
-  await assertSchoolRole(prisma, auth, schoolId, INTERNSHIP_SUPERVISOR_ROLES, meta);
-
+  const scope = await internshipScope(prisma, auth, schoolId, meta, true);
   const student = await prisma.student.findFirst({
     where: { id: input.studentId, schoolId },
     select: { id: true },
   });
   if (!student) {
     throw new AppError(404, "STUDENT_NOT_FOUND", "Siswa tidak ditemukan pada sekolah ini.");
+  }
+  if (!scope.all && !scope.studentIds.includes(student.id)) {
+    throw new AppError(403, "TENANT_FORBIDDEN", "Anda tidak memiliki akses ke data sekolah ini.");
   }
 
   const start = new Date(`${input.startDate}T00:00:00.000Z`);
@@ -119,23 +154,13 @@ export async function listInternshipLogs(
   schoolId: string,
   meta: RequestMeta,
 ) {
-  await assertSchoolAccess(prisma, auth, schoolId, meta);
-  const canVerify =
-    auth.isSystemOwner ||
-    auth.assignments.some(
-      (a) => a.schoolId === schoolId && INTERNSHIP_SUPERVISOR_ROLES.includes(a.roleCode as (typeof INTERNSHIP_SUPERVISOR_ROLES)[number]),
-    );
-
-  const linkedStudents = await prisma.parentStudentLink.findMany({
-    where: { schoolId, parentUserId: auth.userId },
-    select: { studentId: true },
-  });
-  const linkedIds = linkedStudents.map((l) => l.studentId);
+  const scope = await internshipScope(prisma, auth, schoolId, meta, false);
+  const canVerify = scope.all || auth.assignments.some((assignment) => assignment.schoolId === schoolId && assignment.roleCode === "WALI_KELAS");
 
   const logs = await prisma.internshipLog.findMany({
     where: {
       schoolId,
-      ...(canVerify ? {} : { studentId: { in: linkedIds.length > 0 ? linkedIds : ["__none__"] } }),
+      ...placementFilter(scope),
     },
     include: {
       placement: { select: { id: true, companyName: true } },
@@ -161,12 +186,12 @@ export async function createInternshipLog(
   },
   meta: RequestMeta,
 ) {
-  await assertSchoolAccess(prisma, auth, schoolId, meta);
+  const scope = await internshipScope(prisma, auth, schoolId, meta, true);
 
   const placement = await prisma.internshipPlacement.findFirst({
     where: { id: input.placementId, schoolId },
   });
-  if (!placement) {
+  if (!placement || (!scope.all && !scope.studentIds.includes(placement.studentId))) {
     throw new AppError(404, "PLACEMENT_NOT_FOUND", "Penempatan PKL tidak ditemukan.");
   }
 
@@ -221,12 +246,12 @@ export async function verifyInternshipLog(
   input: { status: "DISETUJUI" | "REVISI" },
   meta: RequestMeta,
 ) {
-  await assertSchoolRole(prisma, auth, schoolId, INTERNSHIP_SUPERVISOR_ROLES, meta);
+  const scope = await internshipScope(prisma, auth, schoolId, meta, true);
 
   const existing = await prisma.internshipLog.findFirst({
     where: { id: logId, schoolId },
   });
-  if (!existing) {
+  if (!existing || (!scope.all && !scope.studentIds.includes(existing.studentId))) {
     throw new AppError(404, "INTERNSHIP_LOG_NOT_FOUND", "Jurnal PKL tidak ditemukan.");
   }
 

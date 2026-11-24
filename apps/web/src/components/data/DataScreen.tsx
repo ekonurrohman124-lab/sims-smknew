@@ -39,7 +39,14 @@ type DataScreenProps = {
   deletable?: boolean;
   extraActions?: (row: Record<string, unknown>) => ReactNode;
   actions?: ReactNode;
+  emptyTitle?: string;
+  emptyDetail?: string;
   layout?: "default" | "grid";
+  queryParams?: Record<string, string>;
+  searchPlaceholder?: string;
+  toolbar?: ReactNode;
+  stackOnMobile?: boolean;
+  initialPageSize?: 10 | 25 | 50;
 };
 
 const inputClass = "mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 text-sm outline-none focus:border-teal-700 focus:ring-2 focus:ring-teal-700";
@@ -66,12 +73,19 @@ export function DataScreen({
   deletable = true,
   extraActions,
   actions,
+  emptyTitle = "Belum ada data",
+  emptyDetail = "Data yang cocok dengan pencarian belum tersedia.",
   layout = "grid",
+  queryParams,
+  searchPlaceholder = "Cari",
+  toolbar,
+  stackOnMobile = false,
+  initialPageSize = 10,
 }: DataScreenProps) {
   const toast = useToast();
   const [query, setQuery] = useState("");
   const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState<10 | 25 | 50>(10);
+  const [pageSize, setPageSize] = useState<10 | 25 | 50>(initialPageSize);
   const [rows, setRows] = useState<Record<string, unknown>[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
@@ -82,11 +96,21 @@ export function DataScreen({
   const [confirmId, setConfirmId] = useState<string | null>(null);
   const [tick, setTick] = useState(0);
 
+  const filterKey = JSON.stringify(queryParams ?? {});
+
+  useEffect(() => {
+    setPage(1);
+  }, [filterKey, query]);
+
   useEffect(() => {
     if (!endpoint) return;
     let active = true;
     setLoading(true);
     const params = new URLSearchParams({ q: query, page: String(page), pageSize: String(pageSize) });
+    const extra = JSON.parse(filterKey) as Record<string, string>;
+    for (const [key, value] of Object.entries(extra)) {
+      if (value) params.set(key, value);
+    }
     api<PageResult<Record<string, unknown>>>(`${endpoint}?${params.toString()}`)
       .then((data) => {
         if (!active) return;
@@ -104,7 +128,7 @@ export function DataScreen({
     return () => {
       active = false;
     };
-  }, [endpoint, query, page, pageSize, reloadToken, tick]);
+  }, [endpoint, query, page, pageSize, reloadToken, tick, filterKey]);
 
   const pageCount = Math.max(1, Math.ceil(total / pageSize));
 
@@ -198,25 +222,28 @@ export function DataScreen({
           </div>
         ) : null}
       </div>
-      <div className="flex flex-col gap-3 sm:flex-row">
+      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
         <input
           value={query}
           onChange={(event) => {
             setPage(1);
             setQuery(event.target.value);
           }}
-          placeholder="Cari"
-          className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm sm:max-w-xs"
+          placeholder={searchPlaceholder}
+          aria-label={searchPlaceholder}
+          className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm"
         />
-        <label className="text-sm text-slate-600">
+        {toolbar}
+        <label className="block text-sm text-slate-600">
           Tampilkan
           <select
             value={pageSize}
+            aria-label="Jumlah baris"
             onChange={(event) => {
               setPage(1);
               setPageSize(Number(event.target.value) as 10 | 25 | 50);
             }}
-            className="ml-2 rounded-xl border border-slate-300 bg-white px-3 py-2"
+            className="mt-1 w-full rounded-xl border border-slate-300 bg-white px-3 py-2"
           >
             <option value={10}>10</option>
             <option value={25}>25</option>
@@ -232,9 +259,30 @@ export function DataScreen({
           <Skeleton className="h-10" />
         </div>
       ) : null}
-      {!loading && rows.length === 0 ? <EmptyState title="Belum ada data" detail="Data yang cocok dengan pencarian belum tersedia." /> : null}
+      {!loading && rows.length === 0 ? <EmptyState title={emptyTitle} detail={emptyDetail} /> : null}
+      {rows.length > 0 && grid && stackOnMobile ? (
+        <div className="space-y-3 md:hidden">
+          {rows.map((row) => (
+            <article key={String(row.id)} className="rounded-2xl border border-slate-200 bg-white p-4">
+              {columns.map((column) => (
+                <p key={column.key} className="text-sm text-slate-700">
+                  <span className="text-slate-400">{column.label}: </span>
+                  {display(row, column)}
+                </p>
+              ))}
+              {canWrite ? (
+                <div className="mt-3 flex flex-wrap gap-2">
+                  {extraActions?.(row)}
+                  {editable ? <button type="button" className="rounded-lg border border-slate-300 px-3 py-1.5 text-sm" onClick={() => openEdit(row)}>Ubah</button> : null}
+                  {deletable ? <button type="button" className="rounded-lg border border-red-200 px-3 py-1.5 text-sm text-red-700" onClick={() => setConfirmId(String(row.id))}>Hapus</button> : null}
+                </div>
+              ) : null}
+            </article>
+          ))}
+        </div>
+      ) : null}
       {rows.length > 0 && grid ? (
-        <div className={gridTableFrame}>
+        <div className={`${gridTableFrame} ${stackOnMobile ? "hidden md:block" : ""}`}>
           <table className={gridTable}>
             <thead>
               <tr>
@@ -318,7 +366,7 @@ export function DataScreen({
           </div>
         </>
       ) : null}
-      <div className="flex items-center justify-between text-sm text-slate-600">
+      <div className="flex flex-wrap items-center justify-between gap-2 text-sm text-slate-600">
         <p>{total} data</p>
         <div className="flex gap-2">
           <button type="button" className="rounded-lg border border-slate-300 px-3 py-1.5 disabled:opacity-40" disabled={page <= 1} onClick={() => setPage((current) => current - 1)}>Sebelumnya</button>

@@ -1,26 +1,36 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react";
-import type { AcademicOptionsDto, PageResult, PlanItemDto, PlanSlotDto } from "@sims/shared";
+import { Link } from "react-router-dom";
+import type { AcademicOptionsDto, CurriculumDto, PageResult, PlanItemDto, PlanSlotDto } from "@sims/shared";
 import { DataScreen, type ColumnDef, type FieldDef } from "../components/data/DataScreen.tsx";
 import { ApiClientError, api } from "../lib/api.ts";
 import { useSchoolScope } from "../lib/school.tsx";
 
 function useOptions(schoolId: string, reloadToken: number) {
   const [options, setOptions] = useState<AcademicOptionsDto | null>(null);
+  const [status, setStatus] = useState<"idle" | "ready" | "error">("idle");
+  const [message, setMessage] = useState("");
   useEffect(() => {
     if (!schoolId) return;
     let active = true;
+    setStatus("idle");
     api<{ options: AcademicOptionsDto }>(`/api/v1/schools/${schoolId}/academic-options`)
       .then((data) => {
-        if (active) setOptions(data.options);
+        if (!active) return;
+        setOptions(data.options);
+        setStatus("ready");
+        setMessage("");
       })
-      .catch(() => {
-        if (active) setOptions(null);
+      .catch((caught: unknown) => {
+        if (!active) return;
+        setOptions(null);
+        setStatus("error");
+        setMessage(caught instanceof ApiClientError ? caught.message : "Pilihan formulir gagal dimuat.");
       });
     return () => {
       active = false;
     };
   }, [schoolId, reloadToken]);
-  return options;
+  return { options, status, message };
 }
 
 function asChoices(items: { id: string; label: string }[] | undefined) {
@@ -50,29 +60,82 @@ function CoordinateMaster({
   reloadToken: number;
   onChanged: () => void;
 }) {
-  const { schoolId, canCoordinate } = useSchoolScope();
-  const options = useOptions(schoolId, reloadToken);
+  const { schoolId, canCoordinate, canManage } = useSchoolScope();
+  const { options, status, message } = useOptions(schoolId, reloadToken);
   if (!schoolId) return <MissingSchool />;
+  const years = options?.years ?? [];
+  const resolvedFields = fields(options).map((field) => {
+    if (field.name !== "academicYearId" || field.type !== "select" || years.length > 0 || status !== "ready") return field;
+    return {
+      ...field,
+      hint: canManage
+        ? "Belum ada tahun pelajaran. Buka menu Akademik, lalu Tahun Pelajaran. Tombol Tambah tetap tersedia setelah tahun pertama tersimpan."
+        : "Belum ada tahun pelajaran di sekolah ini. Admin sekolah membuatnya pada menu Tahun Pelajaran.",
+    };
+  });
   return (
-    <DataScreen
-      title={title}
-      description={description}
-      endpoint={`/api/v1/schools/${schoolId}/${path}`}
-      columns={columns}
-      fields={fields(options)}
-      canWrite={canCoordinate}
-      editable={editable}
-      reloadToken={reloadToken}
-      onChanged={onChanged}
-    />
+    <div className="space-y-4">
+      {status === "error" ? <p role="alert" className="rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">{message}</p> : null}
+      {path === "curricula" && status === "ready" && years.length === 0 ? (
+        <p role="status" className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm leading-6 text-amber-950">
+          {canManage
+            ? "Tahun pelajaran belum tersedia. Kurikulum tidak membuat tahun secara otomatis. "
+            : "Tahun pelajaran belum tersedia di sekolah ini. Wakil kurikulum dapat memilih tahun setelah admin sekolah membuatnya. "}
+          <Link className="font-semibold underline" to="/tahun-pelajaran">Buka Tahun Pelajaran</Link>
+        </p>
+      ) : null}
+      <DataScreen
+        title={title}
+        description={description}
+        endpoint={`/api/v1/schools/${schoolId}/${path}`}
+        columns={columns}
+        fields={resolvedFields}
+        canWrite={canCoordinate}
+        editable={editable}
+        reloadToken={reloadToken}
+        onChanged={onChanged}
+      />
+    </div>
+  );
+}
+
+function CurriculumReview({ schoolId, reloadToken }: { schoolId: string; reloadToken: number }) {
+  const [notes, setNotes] = useState<string[]>([]);
+  useEffect(() => {
+    if (!schoolId) return;
+    let active = true;
+    api<PageResult<CurriculumDto>>(`/api/v1/schools/${schoolId}/curricula?page=1&pageSize=10`)
+      .then((page) => {
+        if (!active) return;
+        const item = page.items.find((row) => row.reviewLabel === "PERLU VERIFIKASI");
+        setNotes(item?.reviewNotes ?? []);
+      })
+      .catch(() => {
+        if (active) setNotes([]);
+      });
+    return () => {
+      active = false;
+    };
+  }, [schoolId, reloadToken]);
+  if (notes.length === 0) return null;
+  return (
+    <section className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm leading-6 text-amber-950">
+      <h2 className="font-semibold">PERLU VERIFIKASI</h2>
+      <p className="mt-1">Daftar ini hanya pemeriksaan sekolah. Penanda ini bukan status persetujuan rapor dan bukan pengesahan data.</p>
+      <ul className="mt-2 list-disc space-y-1 pl-5">
+        {notes.map((note) => <li key={note}>{note}</li>)}
+      </ul>
+    </section>
   );
 }
 
 export function CurriculaPage() {
+  const { schoolId } = useSchoolScope();
   const [reloadToken, setReloadToken] = useState(0);
   const refresh = () => setReloadToken((current) => current + 1);
   return (
     <div className="space-y-10">
+      {schoolId ? <CurriculumReview schoolId={schoolId} reloadToken={reloadToken} /> : null}
       <CoordinateMaster
         reloadToken={reloadToken}
         onChanged={refresh}
@@ -83,6 +146,7 @@ export function CurriculaPage() {
           { key: "code", label: "Kode" },
           { key: "name", label: "Nama" },
           { key: "academicYearName", label: "Tahun" },
+          { key: "reviewLabel", label: "Pemeriksaan", render: (row) => (row.reviewLabel === "PERLU VERIFIKASI" ? "PERLU VERIFIKASI" : "—") },
           { key: "isActive", label: "Status", render: (row) => (row.isActive ? "Aktif" : "Tidak aktif") },
         ]}
         fields={(options) => [
@@ -363,7 +427,7 @@ function PlanList({
 
 export function LearningPlansPage() {
   const { schoolId, canCoordinate } = useSchoolScope();
-  const options = useOptions(schoolId, 0);
+  const { options } = useOptions(schoolId, 0);
   const slots = options?.planSlots ?? [];
   const [periodId, setPeriodId] = useState("");
   const [classId, setClassId] = useState("");
@@ -447,60 +511,94 @@ function ParallelPlanCopy({
 }) {
   const [targetClassIds, setTargetClassIds] = useState<string[]>([]);
   const [copying, setCopying] = useState(false);
-  const [message, setMessage] = useState("");
+  const [message, setMessage] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
 
   useEffect(() => {
     setTargetClassIds([]);
-    setMessage("");
+    setMessage(null);
   }, [sourceSlot.classId, sourceSlot.subjectId, sourceSlot.academicPeriodId]);
 
   if (parallelSlots.length === 0) return null;
 
+  async function loadPlan(path: "learning-objectives" | "material-scopes"): Promise<PlanItemDto[]> {
+    const params = {
+      classId: sourceSlot.classId,
+      subjectId: sourceSlot.subjectId,
+      academicPeriodId: sourceSlot.academicPeriodId,
+    };
+    const items: PlanItemDto[] = [];
+    const seen = new Set<string>();
+    let total = Number.POSITIVE_INFINITY;
+    let page = 1;
+    while (items.length < total && page <= 100) {
+      const query = new URLSearchParams({ ...params, page: String(page), pageSize: "50" });
+      const res = await api<PageResult<PlanItemDto>>(`/api/v1/schools/${schoolId}/${path}?${query.toString()}`);
+      total = res.total;
+      for (const item of res.items) {
+        if (seen.has(item.id)) continue;
+        seen.add(item.id);
+        items.push(item);
+      }
+      if (res.items.length === 0) break;
+      page += 1;
+    }
+    if (items.length !== total) {
+      throw new ApiClientError(0, "INCOMPLETE", "Data sumber belum lengkap. Penyalinan dibatalkan.");
+    }
+    return items;
+  }
+
   async function handleCopy() {
-    if (targetClassIds.length === 0) return;
+    const classes = [...new Set(targetClassIds)].filter((classId) => classId !== sourceSlot.classId);
+    if (classes.length === 0) return;
     setCopying(true);
-    setMessage("");
+    setMessage(null);
+    let created = 0;
+    let duplicate = 0;
+    let failed = 0;
+    const failureNotes: string[] = [];
     try {
-      const baseQuery = `classId=${encodeURIComponent(sourceSlot.classId)}&subjectId=${encodeURIComponent(sourceSlot.subjectId)}&academicPeriodId=${encodeURIComponent(sourceSlot.academicPeriodId)}&page=1&pageSize=100`;
-      const [tpRes, lmRes] = await Promise.all([
-        api<PageResult<PlanItemDto>>(`/api/v1/schools/${schoolId}/learning-objectives?${baseQuery}`),
-        api<PageResult<PlanItemDto>>(`/api/v1/schools/${schoolId}/material-scopes?${baseQuery}`),
-      ]);
-      let copiedCount = 0;
-      for (const targetClassId of targetClassIds) {
-        for (const tp of tpRes.items) {
-          try {
-            await api(`/api/v1/schools/${schoolId}/learning-objectives`, {
-              method: "POST",
-              body: JSON.stringify({
-                classId: targetClassId,
-                subjectId: sourceSlot.subjectId,
-                academicPeriodId: sourceSlot.academicPeriodId,
-                code: tp.code,
-                description: tp.description,
-              }),
-            });
-            copiedCount += 1;
-          } catch {}
-        }
-        for (const lm of lmRes.items) {
-          try {
-            await api(`/api/v1/schools/${schoolId}/material-scopes`, {
-              method: "POST",
-              body: JSON.stringify({
-                classId: targetClassId,
-                subjectId: sourceSlot.subjectId,
-                academicPeriodId: sourceSlot.academicPeriodId,
-                code: lm.code,
-                description: lm.description,
-              }),
-            });
-            copiedCount += 1;
-          } catch {}
+      const [objectives, scopes] = await Promise.all([loadPlan("learning-objectives"), loadPlan("material-scopes")]);
+      const batches = [
+        { path: "learning-objectives", items: objectives },
+        { path: "material-scopes", items: scopes },
+      ] as const;
+      for (const classId of classes) {
+        for (const batch of batches) {
+          for (const item of batch.items) {
+            try {
+              await api(`/api/v1/schools/${schoolId}/${batch.path}`, {
+                method: "POST",
+                body: JSON.stringify({
+                  classId,
+                  subjectId: sourceSlot.subjectId,
+                  academicPeriodId: sourceSlot.academicPeriodId,
+                  code: item.code,
+                  description: item.description,
+                  sequence: item.sequence,
+                }),
+              });
+              created += 1;
+            } catch (caught) {
+              if (caught instanceof ApiClientError && (caught.status === 409 || caught.code === "DUPLICATE")) {
+                duplicate += 1;
+                continue;
+              }
+              failed += 1;
+              const reason = caught instanceof ApiClientError ? caught.message : "Tidak dapat terhubung ke server.";
+              if (failureNotes.length < 3) failureNotes.push(`${item.code}: ${reason}`);
+            }
+          }
         }
       }
-      setMessage(`Berhasil menyalin ${copiedCount} item TP & Lingkup Materi ke ${targetClassIds.length} kelas paralel.`);
-      setTargetClassIds([]);
+      const summary = `Salin TP dan lingkup materi: berhasil ${created}, duplikat ${duplicate}, gagal ${failed}.`;
+      setMessage({
+        kind: failed > 0 ? "err" : "ok",
+        text: failureNotes.length > 0 ? `${summary} ${failureNotes.join("; ")}` : summary,
+      });
+      if (failed === 0) setTargetClassIds([]);
+    } catch (caught) {
+      setMessage({ kind: "err", text: caught instanceof ApiClientError ? caught.message : "TP dan lingkup materi gagal dimuat." });
     } finally {
       setCopying(false);
     }
@@ -537,7 +635,7 @@ function ParallelPlanCopy({
           {copying ? "Menyalin..." : `Salin ke ${targetClassIds.length} Kelas Terpilih`}
         </button>
       </div>
-      {message ? <p className="mt-2 text-xs font-medium text-emerald-800">{message}</p> : null}
+      {message ? <p className={`mt-2 text-xs font-medium ${message.kind === "ok" ? "text-emerald-800" : "text-rose-800"}`}>{message.text}</p> : null}
     </div>
   );
 }

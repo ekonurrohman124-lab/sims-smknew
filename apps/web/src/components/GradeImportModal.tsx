@@ -26,6 +26,11 @@ export function GradeImportModal(props: Props) {
         <label className="block text-xs font-semibold text-slate-700">Pilih File Nilai
           <input type="file" accept=".xlsx,.xlsm,.xls,.ods,.csv,.tsv,.txt" onChange={(e) => { const f = e.target.files?.[0]; if (f) props.onFile(f); }} className="mt-1 block w-full text-xs text-slate-700 file:mr-3 file:rounded-lg file:border file:border-slate-300 file:bg-slate-50 file:px-3 file:py-1.5 file:text-xs file:font-semibold" />
         </label>
+        {importData?.stats ? (
+          <p className="rounded-lg bg-slate-50 px-2.5 py-2 text-[11px] leading-5 text-slate-700">
+            Pratinjau: {importData.stats.accepted} nilai siap disimpan, {importData.stats.skippedEmpty} kosong dilewati, {importData.stats.rejectedInvalid} di luar rentang 0–100, {importData.stats.unmatchedNames.length} nama tidak ada di kelas ini.
+          </p>
+        ) : null}
         {importData && importData.sheetNames.length > 0 ? (
           <label className="block text-xs font-semibold text-slate-700">Pilih Sheet Workbook
             <select value={importSheetName} onChange={(e) => props.onSelectSheet(e.target.value)} className="mt-1 block h-9 w-full rounded-lg border border-slate-300 bg-white px-2.5 text-xs font-normal text-slate-800">

@@ -1,5 +1,6 @@
+import type { RoleCode } from "@sims/shared";
 import { Link, Navigate, Outlet } from "react-router-dom";
-import { isGuru, isStaff, isWali } from "../lib/access.ts";
+import { isGuru, isOwner, isStaff, isWali, rolesAtSchool } from "../lib/access.ts";
 import { SuperAppHome } from "../pages/SuperAppHome.tsx";
 import { useAuth } from "../lib/auth.tsx";
 import { usePortal } from "../lib/portal.tsx";
@@ -53,6 +54,15 @@ export function RequireAccess({ allow }: { allow: "staff" | "guru" | "wali" | "p
     allow === "guru" ? guru :
     allow === "wali" ? waliRole && (homerooms.length > 0 || (!staff && !guru)) :
     staff || guru || waliRole;
+  if (!allowed) return <ForbiddenPage />;
+  return <Outlet />;
+}
+
+export function RequireSchoolRoles({ allow }: { allow: readonly RoleCode[] }) {
+  const { user } = useAuth();
+  const { schoolId, loading } = useSchoolScope();
+  if (loading) return <p className="text-sm text-slate-500">Memuat akses...</p>;
+  const allowed = isOwner(user) || rolesAtSchool(user, schoolId).some((role) => allow.includes(role));
   if (!allowed) return <ForbiddenPage />;
   return <Outlet />;
 }

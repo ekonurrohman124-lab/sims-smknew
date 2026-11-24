@@ -195,10 +195,10 @@ describe("Impor siswa", { concurrency: 1 }, () => {
     const wrongYear = await upload(context, adminToken, school.id, "siswa.csv", Buffer.from("nisn,nama,jenis_kelamin\n0011111101,Siswa Tahun,L\n"), otherYear.id);
     assert.equal(wrongYear.statusCode, 400, wrongYear.body);
     assert.match(wrongYear.body, /Tahun pelajaran tidak ditemukan/);
-    const tooMany = ["nisn,nama,jenis_kelamin", ...Array.from({ length: 1001 }, () => "0000000000,Nama Panjang,L")].join("\n");
+    const tooMany = ["nisn,nama,jenis_kelamin", ...Array.from({ length: 4001 }, () => "0000000000,Nama Panjang,L")].join("\n");
     const limited = await upload(context, adminToken, school.id, "siswa.csv", Buffer.from(tooMany));
     assert.equal(limited.statusCode, 400, limited.body);
-    assert.match(limited.body, /1\.000 baris/);
+    assert.match(limited.body, /4\.000 baris/);
 
     const beforeStudents = await context.prisma.student.count({ where: { schoolId: school.id } });
     const beforeAudit = await context.prisma.auditLog.count({ where: { action: "STUDENTS_IMPORTED" } });
@@ -229,13 +229,15 @@ describe("Impor siswa", { concurrency: 1 }, () => {
     const previewBody = jsonBody<ImportPreviewDto>(preview);
     assert.equal(previewBody.totalCount, 20);
     assert.equal(previewBody.validCount, 10);
-    assert.equal(previewBody.duplicateCount, 4);
-    assert.equal(previewBody.failedCount, 6);
-    assert.equal(previewBody.rows.find((row) => row.data.nama === "Siswa Kelas Hilang")?.status, "GAGAL");
-    assert.match(previewBody.rows.find((row) => row.data.nama === "Siswa Kelas Hilang")?.errors.join(" ") ?? "", /tidak tersedia/);
-    assert.equal(previewBody.rows.find((row) => row.data.nama === "Siswa Kelas Tetangga")?.status, "GAGAL");
-    assert.equal(previewBody.rows.find((row) => row.data.nama === "Siswa Duplikat NISN")?.status, "DUPLIKAT");
-    assert.equal(previewBody.rows.find((row) => row.data.nama === "Siswa NIS Lama")?.status, "DUPLIKAT");
+    assert.equal(previewBody.duplicateCount, 2);
+    assert.equal(previewBody.failedCount, 1);
+    assert.equal(previewBody.reviewCount, 7);
+    assert.equal(previewBody.rows.find((row) => row.data.nama === "Siswa Kelas Hilang")?.status, "NEEDS_REVIEW");
+    assert.match(previewBody.rows.find((row) => row.data.nama === "Siswa Kelas Hilang")?.errors.join(" ") ?? "", /tidak ditemukan/);
+    assert.equal(previewBody.rows.find((row) => row.data.nama === "Siswa Kelas Tetangga")?.status, "NEEDS_REVIEW");
+    assert.equal(previewBody.rows.find((row) => row.data.nama === "Siswa Duplikat NISN")?.status, "DUPLICATE");
+    assert.equal(previewBody.rows.find((row) => row.data.nama === "Siswa NISN Lama")?.status, "NEEDS_REVIEW");
+    assert.equal(previewBody.rows.find((row) => row.data.nama === "Siswa NIS Lama")?.status, "NEEDS_REVIEW");
     assert.equal(await context.prisma.student.count({ where: { schoolId: school.id } }), 1);
 
     const commit = await call(context, "POST", `/api/v1/schools/${school.id}/imports/students/commit`, adminToken, {
@@ -245,8 +247,9 @@ describe("Impor siswa", { concurrency: 1 }, () => {
     assert.equal(commit.statusCode, 200, commit.body);
     const commitBody = jsonBody<ImportCommitDto>(commit);
     assert.equal(commitBody.created, 10);
-    assert.equal(commitBody.duplicateCount, 4);
-    assert.equal(commitBody.failedCount, 6);
+    assert.equal(commitBody.updated ?? 0, 0);
+    assert.equal(commitBody.duplicateCount, 2);
+    assert.equal(commitBody.failedCount, 1);
     assert.equal(await context.prisma.student.count({ where: { schoolId: school.id } }), 11);
 
     const leading = await context.prisma.student.findUniqueOrThrow({ where: { nisn: "0012345601" } });

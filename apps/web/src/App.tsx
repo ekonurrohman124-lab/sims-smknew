@@ -2,7 +2,7 @@ import { StudentPromotionPage } from "./pages/StudentPromotionPage.tsx";
 import { SopFrameworkPage } from "./pages/SopFrameworkPage.tsx";
 import { Suspense, lazy } from "react";
 import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
-import { GuestRoute, HomeGate, ProtectedRoute, RequireAccess } from "./components/RouteGuards.tsx";
+import { GuestRoute, HomeGate, ProtectedRoute, RequireAccess, RequireSchoolRoles } from "./components/RouteGuards.tsx";
 import { AppShell } from "./components/shell/AppShell.tsx";
 import { AuthProvider } from "./lib/auth.tsx";
 import { LoginPage } from "./pages/LoginPage.tsx";
@@ -24,6 +24,7 @@ const StaffAttendancePage = lazy(() => import("./pages/StaffAttendancePage.tsx")
 const TeachingJournalPage = lazy(() => import("./pages/TeachingJournalPage.tsx").then((m) => ({ default: m.TeachingJournalPage })));
 const SchoolProfilePage = lazy(() => import("./pages/AcademicPages.tsx").then((m) => ({ default: m.SchoolProfilePage })));
 const SemestersPage = lazy(() => import("./pages/AcademicPages.tsx").then((m) => ({ default: m.SemestersPage })));
+const EducationCalendarPage = lazy(() => import("./pages/EducationCalendarPage.tsx").then((m) => ({ default: m.EducationCalendarPage })));
 const StudentsPage = lazy(() => import("./pages/AcademicPages.tsx").then((m) => ({ default: m.StudentsPage })));
 const SubjectsPage = lazy(() => import("./pages/AcademicPages.tsx").then((m) => ({ default: m.SubjectsPage })));
 const TeachersPage = lazy(() => import("./pages/AcademicPages.tsx").then((m) => ({ default: m.TeachersPage })));
@@ -119,6 +120,7 @@ export function App() {
                 </Route>
                 <Route element={<RequireAccess allow="plan" />}>
                   <Route path="/pembelajaran" element={<LearningPlansPage />} />
+                  <Route path="/kalender-pendidikan" element={<EducationCalendarPage />} />
                 </Route>
                 <Route element={<RequireAccess allow="wali" />}>
                   <Route path="/wali/beranda" element={<WaliHomePage />} />
@@ -135,14 +137,24 @@ export function App() {
                   <Route path="/wali/rekap-nilai" element={<GradeRecapPage />} />
                 </Route>
                 <Route path="/sop-kerja" element={<SopFrameworkPage />} />
-          <Route path="/kesiswaan/pkl" element={<InternshipPage />} />
-          <Route path="/vokasi/inventaris" element={<VokasiPage mode="inventaris" />} />
-          <Route path="/vokasi/bkk" element={<VokasiPage mode="bkk" />} />
-          <Route path="/ppdb" element={<PublicPortalPage mode="ppdb" />} />
-          <Route path="/kesiswaan/whistleblower" element={<PublicPortalPage mode="whistleblower" />} />
-          <Route path="/keuangan/spp" element={<FinanceParentPortalPage />} />
-          <Route path="/wali/portal" element={<FinanceParentPortalPage />} />
-          <Route path="/kesiswaan/karakter-bk" element={<CharacterCounselingPage />} />
+                <Route element={<RequireSchoolRoles allow={["ADMIN_SEKOLAH", "KEPALA_SEKOLAH", "WAKAKUR", "TU", "WAKA_KESISWAAN", "WAKA_HUMAS", "KAPROG", "WALI_KELAS"] as const} />}>
+                  <Route path="/kesiswaan/pkl" element={<InternshipPage />} />
+                </Route>
+                <Route element={<RequireSchoolRoles allow={["ADMIN_SEKOLAH", "TU", "KEPALA_SEKOLAH", "WAKAKUR", "GURU_MAPEL", "WALI_KELAS", "KAPROG", "WAKA_SARPRAS", "WAKA_HUMAS", "WAKA_KESISWAAN"] as const} />}>
+                  <Route path="/vokasi/inventaris" element={<VokasiPage mode="inventaris" />} />
+                  <Route path="/vokasi/bkk" element={<VokasiPage mode="bkk" />} />
+                </Route>
+                <Route element={<RequireSchoolRoles allow={["ADMIN_SEKOLAH", "TU", "KEPALA_SEKOLAH", "WAKAKUR", "WAKA_HUMAS"] as const} />}>
+                  <Route path="/ppdb" element={<PublicPortalPage mode="ppdb" />} />
+                </Route>
+                <Route element={<RequireSchoolRoles allow={["ADMIN_SEKOLAH", "TU", "KEPALA_SEKOLAH", "WAKAKUR", "GURU_MAPEL", "WALI_KELAS", "WAKA_KESISWAAN"] as const} />}>
+                  <Route path="/kesiswaan/whistleblower" element={<PublicPortalPage mode="whistleblower" />} />
+                  <Route path="/kesiswaan/karakter-bk" element={<CharacterCounselingPage />} />
+                </Route>
+                <Route element={<RequireSchoolRoles allow={["ADMIN_SEKOLAH", "KEPALA_SEKOLAH", "TU", "BENDAHARA", "KOMITE_SEKOLAH", "WALI_KELAS"] as const} />}>
+                  <Route path="/keuangan/spp" element={<FinanceParentPortalPage />} />
+                  <Route path="/wali/portal" element={<FinanceParentPortalPage />} />
+                </Route>
                 <Route path="/akun" element={<ProfilePage />} />
                 <Route path="/akun/sandi" element={<AccountPasswordPage />} />
               </Route>

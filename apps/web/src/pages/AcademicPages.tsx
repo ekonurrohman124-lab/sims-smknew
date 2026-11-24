@@ -333,6 +333,9 @@ function Master({
   fields,
   creatable = true,
   editable = true,
+  write = "coordinate",
+  emptyTitle,
+  emptyDetail,
 }: {
   title: string;
   description: string;
@@ -341,6 +344,9 @@ function Master({
   fields: (options: AcademicOptionsDto | null) => FieldDef[];
   creatable?: boolean;
   editable?: boolean;
+  write?: "coordinate" | "manage";
+  emptyTitle?: string;
+  emptyDetail?: string;
 }) {
   const { schoolId, canManage, canCoordinate } = useSchoolScope();
   const [reloadToken, setReloadToken] = useState(0);
@@ -353,11 +359,13 @@ function Master({
       endpoint={screen(schoolId, path)}
       columns={columns}
       fields={fields(options)}
-      canWrite={canCoordinate}
+      canWrite={write === "manage" ? canManage : canCoordinate}
       creatable={creatable}
       editable={editable}
       reloadToken={reloadToken}
       onChanged={() => setReloadToken((current) => current + 1)}
+      emptyTitle={emptyTitle}
+      emptyDetail={emptyDetail}
     />
   );
 }
@@ -366,13 +374,16 @@ export function YearsPage() {
   return (
     <Master
       title="Tahun pelajaran"
-      description="Satu tahun pelajaran dapat diaktifkan untuk sekolah ini."
+      description="Admin sekolah menambah tahun pelajaran berikutnya dari tombol Tambah. Tombol itu tetap tersedia setelah tahun pertama tersimpan. Wakakur hanya membaca."
       path="academic-years"
+      write="manage"
+      emptyTitle="Belum ada tahun pelajaran"
+      emptyDetail="Admin sekolah menambah tahun pelajaran dengan tombol Tambah. Tahun yang sudah dipakai kelas, kurikulum, nilai, atau rapor hanya dapat diubah status aktifnya."
       columns={[
         { key: "name", label: "Nama" },
         { key: "startDate", label: "Mulai" },
         { key: "endDate", label: "Selesai" },
-        { key: "isActive", label: "Status", render: (row) => activeLabel(row.isActive) },
+        { key: "isActive", label: "Status", render: (row) => (row.isActive ? "Aktif" : "Nonaktif") },
       ]}
       fields={() => [
         { name: "name", label: "Nama", type: "text", required: true },
@@ -384,12 +395,138 @@ export function YearsPage() {
   );
 }
 
-export function SemestersPage() {
+type KaldikSemester = {
+  semesterKind: "GANJIL" | "GENAP";
+  name: string;
+  startDate: string;
+  endDate: string;
+  isActive: boolean;
+  action: "REUSE" | "CREATE" | "YEAR_MISSING";
+  existingId: string | null;
+  storedStart: string | null;
+  storedEnd: string | null;
+};
+
+type KaldikPreview = {
+  source: string;
+  verification: "BELUM_TERVERIFIKASI";
+  warning: string;
+  yearStartCandidate: string;
+  yearEndCandidate: null;
+  overlap: boolean;
+  year: { id: string; name: string; startDate: string; endDate: string; isActive: boolean; action: "REUSE"; dateChange: "TIDAK_DIUBAH" } | null;
+  semesters: KaldikSemester[];
+};
+
+function KaldikPanel({ onApplied }: { onApplied: () => void }) {
+  const { schoolId, canManage } = useSchoolScope();
+  const [preview, setPreview] = useState<KaldikPreview | null>(null);
+  const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+  const [confirming, setConfirming] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [tick, setTick] = useState(0);
+
+  useEffect(() => {
+    if (!schoolId) return;
+    let active = true;
+    api<{ preview: KaldikPreview }>(`/api/v1/schools/${schoolId}/kaldik-preview`)
+      .then((data) => {
+        if (active) setPreview(data.preview);
+      })
+      .catch((caught: unknown) => {
+        if (active) setError(caught instanceof ApiClientError ? caught.message : "Pratinjau kaldik gagal dimuat.");
+      });
+    return () => {
+      active = false;
+    };
+  }, [schoolId, tick]);
+
+  if (!schoolId) return null;
+  const pending = preview?.semesters.filter((semester) => semester.action === "CREATE") ?? [];
+
+  async function save() {
+    if (!preview?.year) return;
+    setSaving(true);
+    setError("");
+    try {
+      for (const semester of pending) {
+        await api(`/api/v1/schools/${schoolId}/semesters`, {
+          method: "POST",
+          body: JSON.stringify({
+            academicYearId: preview.year.id,
+            name: semester.name,
+            semesterKind: semester.semesterKind,
+            startDate: semester.startDate,
+            endDate: semester.endDate,
+            isActive: false,
+          }),
+        });
+      }
+      setConfirming(false);
+      setNotice("Semester yang belum ada tersimpan. Tahun pelajaran tidak diubah dan tidak diaktifkan.");
+      setTick((current) => current + 1);
+      onApplied();
+    } catch (caught) {
+      setError(caught instanceof ApiClientError ? caught.message : "Semester gagal disimpan.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
   return (
-    <Master
-      title="Semester"
-      description="Semester ganjil atau genap pada tahun pelajaran."
-      path="semesters"
+    <section className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-4 text-sm leading-6 text-amber-950">
+      <h2 className="text-base font-semibold">Kaldik Lampung 2026/2027</h2>
+      {preview ? <p className="mt-1">{preview.source}</p> : null}
+      {preview ? <p role="status" className="mt-2">{preview.warning}</p> : null}
+      {error ? <p role="alert" className="mt-2 rounded-xl bg-red-50 px-3 py-2 text-red-800">{error}</p> : null}
+      {notice ? <p role="status" className="mt-2 rounded-xl bg-white px-3 py-2">{notice}</p> : null}
+      {preview?.year ? (
+        <p className="mt-2">Tahun {preview.year.name} dipakai ulang. Tersimpan {preview.year.startDate} sampai {preview.year.endDate}, status {preview.year.isActive ? "aktif" : "nonaktif"}. Kandidat mulai {preview.yearStartCandidate}. Tanggal selesai tahun belum terverifikasi, jadi tidak diusulkan.</p>
+      ) : (
+        <p className="mt-2">Tahun pelajaran 2026/2027 belum ada. Buat tahun itu pada menu Tahun Pelajaran sebelum menyimpan semester. Tahun tidak dibuat dari pratinjau ini.</p>
+      )}
+      {preview ? (
+        <ul className="mt-2 list-disc pl-5">
+          {preview.semesters.map((semester) => (
+            <li key={semester.semesterKind}>
+              {semester.name}: {semester.startDate} sampai {semester.endDate}. {semester.action === "REUSE" ? "Sudah ada dan tidak diubah." : semester.action === "CREATE" ? "Belum ada." : "Menunggu tahun pelajaran."}
+            </li>
+          ))}
+        </ul>
+      ) : null}
+      {canManage && pending.length > 0 && preview && !preview.overlap ? (
+        <button type="button" className="mt-3 rounded-xl bg-teal-800 px-4 py-2 text-sm font-semibold text-white" onClick={() => setConfirming(true)}>
+          Tinjau penyimpanan semester
+        </button>
+      ) : null}
+      {confirming ? (
+        <div className="fixed inset-0 z-[100] flex items-end justify-center bg-slate-950/50 p-3 sm:items-center">
+          <div role="dialog" aria-modal="true" className="w-full max-w-lg rounded-2xl bg-white p-5 text-slate-800 shadow-xl">
+            <h3 className="text-lg font-semibold">Simpan kandidat semester?</h3>
+            <p className="mt-2 text-sm leading-6">Tanggal masih belum terverifikasi terhadap lampiran SK. Semester baru disimpan dalam status nonaktif. Tahun pelajaran, siswa, kelas, nilai, presensi, dan rapor tidak diubah.</p>
+            <div className="mt-5 flex justify-end gap-2">
+              <button type="button" className="rounded-xl border border-slate-300 px-4 py-2 text-sm" onClick={() => setConfirming(false)}>Batal</button>
+              <button type="button" disabled={saving} className="rounded-xl bg-teal-800 px-4 py-2 text-sm font-semibold text-white disabled:opacity-60" onClick={() => void save()}>{saving ? "Menyimpan..." : "Simpan semester"}</button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+export function SemestersPage() {
+  const [reloadKey, setReloadKey] = useState(0);
+  return (
+    <div className="space-y-4">
+      <KaldikPanel onApplied={() => setReloadKey((current) => current + 1)} />
+      <Master
+        key={reloadKey}
+        title="Semester"
+        description="Semester ganjil atau genap pada tahun pelajaran. Admin sekolah yang mengubah data ini."
+        path="semesters"
+        write="manage"
       columns={[
         { key: "name", label: "Nama" },
         { key: "semesterKind", label: "Jenis", render: (row) => (row.semesterKind === "GENAP" ? "Genap" : "Ganjil") },
@@ -404,7 +541,8 @@ export function SemestersPage() {
         { name: "endDate", label: "Selesai", type: "date", required: true },
         { name: "isActive", label: "Jadikan semester aktif", type: "checkbox" },
       ]}
-    />
+      />
+    </div>
   );
 }
 
@@ -412,8 +550,9 @@ export function FieldsPage() {
   return (
     <Master
       title="Bidang keahlian"
-      description="Bidang keahlian SMK pada sekolah ini."
+      description="Bidang keahlian SMK pada sekolah ini. Admin sekolah yang mengubah data ini."
       path="expertise-fields"
+      write="manage"
       columns={[
         { key: "code", label: "Kode" },
         { key: "name", label: "Nama" },
@@ -432,8 +571,9 @@ export function ProgramsPage() {
   return (
     <Master
       title="Program keahlian"
-      description="Program keahlian berada di bawah bidang."
+      description="Program keahlian berada di bawah bidang. Admin sekolah yang mengubah data ini."
       path="expertise-programs"
+      write="manage"
       columns={[
         { key: "code", label: "Kode" },
         { key: "name", label: "Nama" },
@@ -454,8 +594,9 @@ export function ConcentrationsPage() {
   return (
     <Master
       title="Konsentrasi keahlian"
-      description="Konsentrasi berada di bawah program keahlian."
+      description="Konsentrasi berada di bawah program keahlian. Admin sekolah yang mengubah data ini."
       path="expertise-concentrations"
+      write="manage"
       columns={[
         { key: "code", label: "Kode" },
         { key: "name", label: "Nama" },
@@ -485,6 +626,7 @@ type TeacherDraft = {
   roles: TeacherRole[];
   isActive: boolean;
   userId: string | null;
+  linking: boolean;
 };
 
 const emptyTeacher = (): TeacherDraft => ({
@@ -498,7 +640,18 @@ const emptyTeacher = (): TeacherDraft => ({
   roles: ["GURU_MAPEL"],
   isActive: true,
   userId: null,
+  linking: false,
 });
+
+function teacherRoles(value: unknown): TeacherRole[] {
+  return Array.isArray(value) ? value.filter((code): code is TeacherRole => code === "GURU_MAPEL" || code === "WALI_KELAS") : [];
+}
+
+function linkLabel(value: unknown): string {
+  if (value === "TERHUBUNG") return "Terhubung";
+  if (value === "BELUM_TERHUBUNG") return "Belum Terhubung";
+  return "Belum ada akun";
+}
 
 function roleLabel(codes: unknown): string {
   const list = Array.isArray(codes) ? codes : [];
@@ -554,7 +707,7 @@ export function TeachersPage() {
   }
 
   function openEdit(row: Record<string, unknown>) {
-    const roles = Array.isArray(row.roleCodes) ? row.roleCodes.filter((code): code is TeacherRole => code === "GURU_MAPEL" || code === "WALI_KELAS") : [];
+    const roles = teacherRoles(row.roleCodes);
     setFormError("");
     setLinkOffer(false);
     setDraft({
@@ -568,6 +721,26 @@ export function TeachersPage() {
       roles: roles.length > 0 ? roles : ["GURU_MAPEL"],
       isActive: row.isActive !== false,
       userId: row.userId ? String(row.userId) : null,
+      linking: false,
+    });
+  }
+
+  function openLink(row: Record<string, unknown>) {
+    const roles = teacherRoles(row.roleCodes);
+    setFormError("");
+    setLinkOffer(false);
+    setDraft({
+      id: null,
+      name: String(row.name ?? ""),
+      nip: "",
+      nuptk: "",
+      gender: "",
+      email: String(row.loginEmail ?? row.email ?? ""),
+      phone: "",
+      roles,
+      isActive: row.isActive !== false,
+      userId: row.userId ? String(row.userId) : null,
+      linking: true,
     });
   }
 
@@ -593,6 +766,10 @@ export function TeachersPage() {
       setFormError("Email/login wajib diisi dan harus valid.");
       return;
     }
+    if (draft.linking && !draft.userId) {
+      setFormError("Akun yang akan dihubungkan tidak ditemukan.");
+      return;
+    }
     if (draft.roles.length === 0) {
       setFormError("Pilih minimal satu peran. Guru Mata Pelajaran dapat digabung dengan Wali Kelas.");
       return;
@@ -611,12 +788,24 @@ export function TeachersPage() {
         isActive: draft.isActive,
         linkExisting,
       };
-      const result = draft.id
-        ? await api<TeacherAccountResult>(`/api/v1/schools/${schoolId}/teachers/${draft.id}/profile`, { method: "PATCH", body: JSON.stringify(body) })
-        : await api<TeacherAccountResult>(`/api/v1/schools/${schoolId}/teachers/with-account`, { method: "POST", body: JSON.stringify(body) });
+      const result = draft.linking
+        ? await api<TeacherAccountResult>(`/api/v1/schools/${schoolId}/teachers/link-profile`, {
+            method: "POST",
+            body: JSON.stringify({
+              userId: draft.userId,
+              name: draft.name.trim(),
+              gender: draft.gender,
+              nip: draft.nip.trim(),
+              nuptk: draft.nuptk.trim(),
+              phone: draft.phone.trim(),
+            }),
+          })
+        : draft.id
+          ? await api<TeacherAccountResult>(`/api/v1/schools/${schoolId}/teachers/${draft.id}/profile`, { method: "PATCH", body: JSON.stringify(body) })
+          : await api<TeacherAccountResult>(`/api/v1/schools/${schoolId}/teachers/with-account`, { method: "POST", body: JSON.stringify(body) });
       setDraft(null);
       setLinkOffer(false);
-      setNotice(result.created ? "Guru dan akun masuk disimpan." : draft.id ? "Data guru diperbarui." : "Akun yang sudah ada dihubungkan ke data guru. Kata sandi tidak diubah.");
+      setNotice(draft.linking ? "Profil guru terhubung ke akun yang sudah ada. Kata sandi dan peran lain tidak diubah." : result.created ? "Guru dan akun masuk disimpan." : draft.id ? "Data guru diperbarui." : "Akun yang sudah ada dihubungkan ke data guru. Kata sandi tidak diubah.");
       if (result.temporaryPassword) setCredential(result);
       setReloadToken((current) => current + 1);
     } catch (caught) {
@@ -643,13 +832,15 @@ export function TeachersPage() {
       ) : null}
       <DataScreen
         title="Guru"
-        description="Tambah guru sekaligus membuat akun masuk dan perannya. Akun guru tidak dibuat dari Manajemen Pengguna."
+        description="Akun Guru Mapel dan Wali Kelas yang sudah ada tampil di sini. Profil yang belum tertaut dihubungkan tanpa membuat akun baru."
         endpoint={screen(schoolId, "teachers")}
+        initialPageSize={25}
         columns={[
           { key: "name", label: "Nama" },
           { key: "nip", label: "NIP" },
           { key: "loginEmail", label: "Email masuk", render: (row) => (row.loginEmail ? String(row.loginEmail) : "Belum ada akun") },
           { key: "roleCodes", label: "Peran", render: (row) => roleLabel(row.roleCodes) },
+          { key: "linkStatus", label: "Tautan", render: (row) => linkLabel(row.linkStatus) },
           { key: "isActive", label: "Status", render: (row) => activeLabel(row.isActive) },
         ]}
         fields={[]}
@@ -658,7 +849,9 @@ export function TeachersPage() {
         editable={false}
         reloadToken={reloadToken}
         onChanged={() => setReloadToken((current) => current + 1)}
-        extraActions={(row) => (
+        extraActions={(row) => row.linkStatus === "BELUM_TERHUBUNG" ? (
+          canManage ? <button type="button" className="rounded-lg border border-teal-700 px-2 py-1 font-semibold text-teal-800" onClick={() => openLink(row)}>Hubungkan Profil</button> : null
+        ) : (
           <>
             <button type="button" className="rounded-lg border border-slate-300 px-2 py-1" onClick={() => openEdit(row)}>Ubah</button>
             {row.userId ? (
@@ -680,8 +873,8 @@ export function TeachersPage() {
         <div className="fixed inset-0 z-[100] flex items-end justify-center bg-slate-900/40 p-4 sm:items-center">
           <form className="max-h-[90vh] w-full max-w-lg space-y-3 overflow-y-auto rounded-2xl bg-white p-5 shadow-xl" onSubmit={(event) => { event.preventDefault(); void saveTeacher(false); }}>
             <div>
-              <h2 className="text-lg font-semibold">{draft.id ? "Ubah guru" : "Tambah guru"}</h2>
-              <p className="mt-1 text-sm text-slate-500">{draft.id ? "Akun yang sudah terhubung tetap dipakai. Peran dapat disesuaikan." : "Satu simpanan membuat data guru dan akun masuk."}</p>
+              <h2 className="text-lg font-semibold">{draft.linking ? "Hubungkan profil" : draft.id ? "Ubah guru" : "Tambah guru"}</h2>
+              <p className="mt-1 text-sm text-slate-500">{draft.linking ? "Nama dan email diambil dari akun yang sudah ada. Lengkapi data yang belum tersedia. Peran, kata sandi, dan hak akses tidak diubah." : draft.id ? "Akun yang sudah terhubung tetap dipakai. Peran dapat disesuaikan." : "Satu simpanan membuat data guru dan akun masuk."}</p>
             </div>
             {formError ? <p role="alert" className="rounded-xl bg-red-50 px-3 py-2 text-sm text-red-700">{formError}</p> : null}
             <label className="block text-sm font-medium text-slate-700">Nama guru
@@ -702,22 +895,25 @@ export function TeachersPage() {
               </select>
             </label>
             <label className="block text-sm font-medium text-slate-700">Email/login
-              <input className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 text-sm" type="email" value={draft.email} disabled={Boolean(draft.userId)} onChange={(event) => setDraft({ ...draft, email: event.target.value })} />
+              <input className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 text-sm" type="email" value={draft.email} disabled={Boolean(draft.userId) || draft.linking} onChange={(event) => setDraft({ ...draft, email: event.target.value })} />
             </label>
             <label className="block text-sm font-medium text-slate-700">Telepon
               <input className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 text-sm" value={draft.phone} onChange={(event) => setDraft({ ...draft, phone: event.target.value })} />
             </label>
             <fieldset className="space-y-1">
               <legend className="text-sm font-medium text-slate-700">Peran</legend>
-              <label className="flex items-center gap-2 text-sm text-slate-700"><input type="checkbox" checked={draft.roles.includes("GURU_MAPEL")} onChange={() => toggleTeacherRole("GURU_MAPEL")} />Guru Mata Pelajaran</label>
-              <label className="flex items-center gap-2 text-sm text-slate-700"><input type="checkbox" checked={draft.roles.includes("WALI_KELAS")} onChange={() => toggleTeacherRole("WALI_KELAS")} />Wali Kelas</label>
+              <label className="flex items-center gap-2 text-sm text-slate-700"><input type="checkbox" checked={draft.roles.includes("GURU_MAPEL")} disabled={draft.linking} onChange={() => toggleTeacherRole("GURU_MAPEL")} />Guru Mata Pelajaran</label>
+              <label className="flex items-center gap-2 text-sm text-slate-700"><input type="checkbox" checked={draft.roles.includes("WALI_KELAS")} disabled={draft.linking} onChange={() => toggleTeacherRole("WALI_KELAS")} />Wali Kelas</label>
             </fieldset>
-            <label className="flex items-center gap-2 text-sm font-medium text-slate-700">
-              <input type="checkbox" checked={draft.isActive} onChange={(event) => setDraft({ ...draft, isActive: event.target.checked })} />
-              Akun aktif
-            </label>
-            {draft.userId ? <p className="text-xs text-slate-500">Akun masuk tetap terhubung. Email login tidak diganti dari formulir ini.</p> : null}
-            {!draft.id && !draft.userId ? <p className="text-xs text-slate-500">Kata sandi awal dibuat otomatis dan wajib diganti saat masuk pertama.</p> : null}
+            {draft.linking ? null : (
+              <label className="flex items-center gap-2 text-sm font-medium text-slate-700">
+                <input type="checkbox" checked={draft.isActive} onChange={(event) => setDraft({ ...draft, isActive: event.target.checked })} />
+                Akun aktif
+              </label>
+            )}
+            {draft.linking ? <p className="text-xs text-slate-500">Peran lain pada akun ini tetap berlaku. Tidak ada akun login baru.</p> : null}
+            {draft.userId && !draft.linking ? <p className="text-xs text-slate-500">Akun masuk tetap terhubung. Email login tidak diganti dari formulir ini.</p> : null}
+            {!draft.id && !draft.userId && !draft.linking ? <p className="text-xs text-slate-500">Kata sandi awal dibuat otomatis dan wajib diganti saat masuk pertama.</p> : null}
             <div className="flex flex-wrap justify-end gap-2">
               <button type="button" className="rounded-xl border border-slate-300 px-4 py-2 text-sm" onClick={() => { setDraft(null); setLinkOffer(false); }}>Batal</button>
               {linkOffer ? <button type="button" className="rounded-xl border border-teal-700 px-4 py-2 text-sm font-semibold text-teal-800" disabled={saving} onClick={() => void saveTeacher(true)}>Hubungkan akun yang sudah ada</button> : null}
@@ -766,9 +962,26 @@ export function StudentsPage() {
   const [reloadToken, setReloadToken] = useState(0);
   const [importOpen, setImportOpen] = useState(false);
   const [notice, setNotice] = useState("");
+  const [concentrationId, setConcentrationId] = useState("");
+  const [classId, setClassId] = useState("");
   const options = useOptions(schoolId, reloadToken);
+  const rosterClasses = useMemo(
+    () => (options?.classes ?? []).filter((item) => item.academicYearActive),
+    [options?.classes],
+  );
+  const visibleClasses = useMemo(
+    () => rosterClasses.filter((item) => !concentrationId || item.concentrationId === concentrationId),
+    [rosterClasses, concentrationId],
+  );
+  const queryParams = useMemo(() => {
+    const params: Record<string, string> = {};
+    if (concentrationId) params.concentrationId = concentrationId;
+    if (classId) params.classId = classId;
+    return params;
+  }, [concentrationId, classId]);
   if (!schoolId) return <MissingSchool />;
   const operational = school?.accessStatus !== "NONAKTIF" && school?.accessStatus !== "DITANGGUHKAN";
+  const selectClass = "mt-1 w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm";
   return (
     <>
       {notice ? <p role="status" className="rounded-xl bg-teal-50 px-3 py-2 text-sm text-teal-800">{notice}</p> : null}
@@ -777,6 +990,40 @@ export function StudentsPage() {
         description="NISN unik secara nasional. NIS boleh dikosongkan dan, jika diisi, unik di dalam sekolah."
         endpoint={screen(schoolId, "students")}
         layout="grid"
+        stackOnMobile
+        searchPlaceholder="Cari nama, NISN, atau NIS"
+        queryParams={queryParams}
+        toolbar={(
+          <>
+            <label className="block text-sm text-slate-600">
+              Jurusan
+              <select
+                className={selectClass}
+                aria-label="Jurusan"
+                value={concentrationId}
+                onChange={(event) => {
+                  const next = event.target.value;
+                  setConcentrationId(next);
+                  setClassId((current) => {
+                    if (!next || !current) return current;
+                    const selected = rosterClasses.find((item) => item.id === current);
+                    return selected?.concentrationId === next ? current : "";
+                  });
+                }}
+              >
+                <option value="">Semua</option>
+                {(options?.concentrations ?? []).map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}
+              </select>
+            </label>
+            <label className="block text-sm text-slate-600">
+              Kelas
+              <select className={selectClass} aria-label="Kelas" value={classId} onChange={(event) => setClassId(event.target.value)}>
+                <option value="">Semua</option>
+                {visibleClasses.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}
+              </select>
+            </label>
+          </>
+        )}
         columns={[
           { key: "name", label: "Nama", headerClassName: "min-w-48", cellClassName: "min-w-48 whitespace-normal break-words" },
           { key: "nisn", label: "NISN", headerClassName: "min-w-32", cellClassName: "min-w-32 whitespace-nowrap font-mono" },
@@ -832,8 +1079,9 @@ export function ClassesPage() {
   return (
     <Master
       title="Kelas"
-      description="Kelas terikat pada tahun pelajaran."
+      description="Kelas terikat pada tahun pelajaran. Admin sekolah yang mengubah data ini."
       path="classes"
+      write="manage"
       columns={[
         { key: "name", label: "Nama" },
         { key: "gradeLevel", label: "Tingkat" },
@@ -1002,23 +1250,38 @@ export function TeachingsPage() {
     setSaving(true);
     setError("");
     setNotice("");
+    const classIds = [...new Set(selectedClassIds)];
     let created = 0;
-    let skipped = 0;
-    for (const classId of selectedClassIds) {
+    let duplicate = 0;
+    let failed = 0;
+    const failureNotes: string[] = [];
+    for (const classId of classIds) {
+      const classLabel = options?.classes?.find((item) => item.id === classId)?.label ?? "Kelas";
       try {
         await api(`/api/v1/schools/${schoolId}/teaching-assignments`, {
           method: "POST",
           body: JSON.stringify({ teacherId, subjectId, classId, academicPeriodId: periodId }),
         });
         created += 1;
-      } catch {
-        skipped += 1;
+      } catch (caught) {
+        if (caught instanceof ApiClientError && (caught.status === 409 || caught.code === "DUPLICATE")) {
+          duplicate += 1;
+          continue;
+        }
+        failed += 1;
+        const reason = caught instanceof ApiClientError ? caught.message : "Tidak dapat terhubung ke server.";
+        failureNotes.push(`${classLabel}: ${reason}`);
       }
     }
+    const summary = `Penugasan: berhasil ${created}, duplikat ${duplicate}, gagal ${failed}.`;
     setSaving(false);
-    setModalOpen(false);
-    setNotice(`Penugasan diperbarui: ${created} kelas ditambahkan${skipped > 0 ? `, ${skipped} kelas sudah terdaftar` : ""}.`);
-    setReloadToken((prev) => prev + 1);
+    if (failed > 0) {
+      setError(`${summary} ${failureNotes.slice(0, 3).join("; ")}`);
+    } else {
+      setNotice(summary);
+      setModalOpen(false);
+    }
+    if (created > 0) setReloadToken((prev) => prev + 1);
   }
 
   async function executeDelete() {

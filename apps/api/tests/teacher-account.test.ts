@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { after, before, beforeEach, describe, it } from "node:test";
-import type { ApiErrorBody, LoginResponse, TeacherAccountResult } from "@sims/shared";
+import type { ApiErrorBody, LoginResponse, PageResult, TeacherAccountResult, TeacherRosterDto } from "@sims/shared";
 import {
   assignRole,
   authHeader,
@@ -441,5 +441,137 @@ describe("Akun guru", { concurrency: 1 }, () => {
       headers: authHeader(await tokenFor(context, neighbor.email)),
     });
     assert.equal(foreign.statusCode, 403, foreign.body);
+  });
+
+  it("menampilkan akun guru yang belum tertaut dan menghubungkan profil tanpa membuat akun baru", async () => {
+    const school = await createSchool(context.prisma, { name: "SMK Tautan", npsn: "30100021" });
+    const other = await createSchool(context.prisma, { name: "SMK Tautan Lain", npsn: "30100022" });
+    const admin = await createUser(context.prisma, { email: "admin.tautan@sekolah.test", name: "Admin Tautan", password: PASSWORD });
+    const neighbor = await createUser(context.prisma, { email: "admin.tautan.lain@sekolah.test", name: "Admin Lain", password: PASSWORD });
+    const guru = await createUser(context.prisma, { email: "guru.tautan@sekolah.test", name: "Guru Rangkap", password: PASSWORD });
+    const wali = await createUser(context.prisma, { email: "wali.tautan@sekolah.test", name: "Wali Belum", password: PASSWORD });
+    const outsider = await createUser(context.prisma, { email: "guru.luar.tautan@sekolah.test", name: "Guru Luar", password: PASSWORD });
+    const staff = await createUser(context.prisma, { email: "tu.tautan@sekolah.test", name: "TU Tautan", password: PASSWORD });
+    await assignRole(context.prisma, { userId: admin.id, roleCode: "ADMIN_SEKOLAH", schoolId: school.id });
+    await assignRole(context.prisma, { userId: neighbor.id, roleCode: "ADMIN_SEKOLAH", schoolId: other.id });
+    await assignRole(context.prisma, { userId: guru.id, roleCode: "GURU_MAPEL", schoolId: school.id });
+    await assignRole(context.prisma, { userId: guru.id, roleCode: "KAPROG", schoolId: school.id });
+    await assignRole(context.prisma, { userId: wali.id, roleCode: "GURU_MAPEL", schoolId: school.id });
+    await assignRole(context.prisma, { userId: wali.id, roleCode: "WALI_KELAS", schoolId: school.id });
+    await assignRole(context.prisma, { userId: outsider.id, roleCode: "GURU_MAPEL", schoolId: other.id });
+    await assignRole(context.prisma, { userId: staff.id, roleCode: "TU", schoolId: school.id });
+    const before = await context.prisma.user.findUniqueOrThrow({
+      where: { id: guru.id },
+      include: { assignments: { where: { isActive: true }, include: { role: true } } },
+    });
+    const usersBefore = await context.prisma.user.count();
+    const adminToken = await tokenFor(context, admin.email);
+    const url = `/api/v1/schools/${school.id}/teachers`;
+
+    const listed = await context.app.inject({ method: "GET", url: `${url}?page=1&pageSize=50`, headers: authHeader(adminToken) });
+    assert.equal(listed.statusCode, 200, listed.body);
+    const roster = jsonBody<PageResult<TeacherRosterDto>>(listed);
+    assert.equal(roster.total, 2);
+    assert.equal(roster.items.every((item) => item.linkStatus === "BELUM_TERHUBUNG"), true);
+    assert.deepEqual(roster.items.map((item) => item.userId).sort(), [guru.id, wali.id].sort());
+    assert.equal(roster.items.some((item) => item.userId === outsider.id || item.userId === staff.id), false);
+    const guruRow = roster.items.find((item) => item.userId === guru.id);
+    const waliRow = roster.items.find((item) => item.userId === wali.id);
+    assert.deepEqual(guruRow?.roleCodes, ["GURU_MAPEL"]);
+    assert.deepEqual(waliRow?.roleCodes.sort(), ["GURU_MAPEL", "WALI_KELAS"]);
+    assert.equal(guruRow?.name, "Guru Rangkap");
+    assert.equal(guruRow?.loginEmail, guru.email);
+
+    const denied = await context.app.inject({
+      method: "POST",
+      url: `${url}/link-profile`,
+      headers: authHeader(await tokenFor(context, guru.email)),
+      payload: { userId: wali.id, name: waliRow?.name, gender: "LAKI_LAKI" },
+    });
+    assert.equal(denied.statusCode, 403, denied.body);
+
+    const foreign = await context.app.inject({
+      method: "POST",
+      url: `${url}/link-profile`,
+      headers: authHeader(adminToken),
+      payload: { userId: outsider.id, name: "Guru Luar", gender: "PEREMPUAN" },
+    });
+    assert.equal(foreign.statusCode, 404, foreign.body);
+
+    const linked = await context.app.inject({
+      method: "POST",
+      url: `${url}/link-profile`,
+      headers: authHeader(adminToken),
+      payload: { userId: guru.id, name: "Guru Rangkap", gender: "PEREMPUAN", nip: "12345678" },
+    });
+    assert.equal(linked.statusCode, 201, linked.body);
+    const created = jsonBody<TeacherAccountResult>(linked);
+    assert.equal(created.created, true);
+    assert.equal(created.temporaryPassword, null);
+    assert.equal(created.item.userId, guru.id);
+    assert.equal(created.item.gender, "PEREMPUAN");
+    assert.equal(created.item.email, guru.email);
+    assert.equal(await context.prisma.user.count(), usersBefore);
+    assert.equal(await context.prisma.teacher.count({ where: { userId: guru.id } }), 1);
+
+    const after = await context.prisma.user.findUniqueOrThrow({
+      where: { id: guru.id },
+      include: { assignments: { where: { isActive: true }, include: { role: true } } },
+    });
+    assert.equal(after.passwordHash, before.passwordHash);
+    assert.equal(after.email, before.email);
+    assert.equal(after.isActive, before.isActive);
+    assert.deepEqual(
+      after.assignments.map((item) => item.role.code).sort(),
+      before.assignments.map((item) => item.role.code).sort(),
+    );
+    assert.equal(after.assignments.some((item) => item.role.code === "KAPROG"), true);
+
+    const repeat = await context.app.inject({
+      method: "POST",
+      url: `${url}/link-profile`,
+      headers: authHeader(adminToken),
+      payload: { userId: guru.id, name: "Nama Lain", gender: "LAKI_LAKI" },
+    });
+    assert.equal(repeat.statusCode, 200, repeat.body);
+    const repeated = jsonBody<TeacherAccountResult>(repeat);
+    assert.equal(repeated.created, false);
+    assert.equal(repeated.temporaryPassword, null);
+    assert.equal(repeated.item.gender, "PEREMPUAN");
+    assert.equal(repeated.item.name, "Guru Rangkap");
+    assert.equal(await context.prisma.teacher.count({ where: { userId: guru.id } }), 1);
+
+    const sameNip = await context.app.inject({
+      method: "POST",
+      url: `${url}/link-profile`,
+      headers: authHeader(adminToken),
+      payload: { userId: wali.id, name: "Wali Belum", gender: "LAKI_LAKI", nip: "12345678" },
+    });
+    assert.equal(sameNip.statusCode, 409, sameNip.body);
+    assert.equal(await context.prisma.teacher.count({ where: { userId: wali.id } }), 0);
+
+    const afterList = await context.app.inject({ method: "GET", url: `${url}?page=1&pageSize=10`, headers: authHeader(adminToken) });
+    const afterRoster = jsonBody<PageResult<TeacherRosterDto>>(afterList);
+    assert.equal(afterRoster.total, 2);
+    assert.equal(afterRoster.items.find((item) => item.userId === guru.id)?.linkStatus, "TERHUBUNG");
+    assert.equal(afterRoster.items.find((item) => item.userId === wali.id)?.linkStatus, "BELUM_TERHUBUNG");
+
+    const ownList = await context.app.inject({
+      method: "GET",
+      url: `${url}?page=1&pageSize=50`,
+      headers: authHeader(await tokenFor(context, guru.email)),
+    });
+    const ownRoster = jsonBody<PageResult<TeacherRosterDto>>(ownList);
+    assert.equal(ownRoster.total, 1);
+    assert.equal(ownRoster.items[0]?.userId, guru.id);
+    assert.equal(ownRoster.items[0]?.linkStatus, "TERHUBUNG");
+
+    const outsiderAdmin = await context.app.inject({
+      method: "POST",
+      url: `${url}/link-profile`,
+      headers: authHeader(await tokenFor(context, neighbor.email)),
+      payload: { userId: wali.id, name: "Wali Belum", gender: "LAKI_LAKI" },
+    });
+    assert.equal(outsiderAdmin.statusCode, 403, outsiderAdmin.body);
   });
 });

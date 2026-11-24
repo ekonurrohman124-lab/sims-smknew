@@ -232,7 +232,7 @@ function ShellFrame() {
       </header>
 
       {/* Centered Super-App Canvas */}
-      <main className="relative mx-auto w-full max-w-5xl px-4 pt-5 pb-28 sm:px-6">
+      <main className="relative mx-auto w-full max-w-5xl px-4 pt-5 pb-[calc(7.5rem+env(safe-area-inset-bottom))] sm:px-6 md:pb-8">
         {school && school.accessStatus !== "AKTIF" ? (
           <p role="status" className="mb-4 rounded-2xl bg-amber-50 px-4 py-3 text-xs font-medium text-amber-950">
             Status sekolah saat ini: {school.accessStatus}.
@@ -244,7 +244,7 @@ function ShellFrame() {
       {/* Floating Pill Bottom Dock (Super-App Style) */}
       <nav
         aria-label="Navigasi Utama"
-        className="pointer-events-none fixed right-0 bottom-3 left-0 z-30 px-4 pb-[env(safe-area-inset-bottom)]"
+        className="pointer-events-none fixed right-0 bottom-3 left-0 z-30 px-4 pb-[env(safe-area-inset-bottom)] md:hidden"
       >
         <div className="pointer-events-auto mx-auto grid max-w-md grid-cols-4 gap-1 rounded-[26px] border border-slate-200/90 bg-white/95 p-1.5 shadow-xl shadow-slate-900/10 backdrop-blur-md">
           {navItems.map((item) => (

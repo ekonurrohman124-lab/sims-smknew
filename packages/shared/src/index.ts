@@ -278,6 +278,13 @@ export type TeacherDto = {
   roleCodes: Array<"GURU_MAPEL" | "WALI_KELAS">;
 };
 
+export type TeacherLinkStatus = "TERHUBUNG" | "BELUM_TERHUBUNG";
+
+export type TeacherRosterDto = Omit<TeacherDto, "gender"> & {
+  gender: TeacherDto["gender"] | null;
+  linkStatus: TeacherLinkStatus | null;
+};
+
 export type SchoolClassDto = {
   id: string;
   schoolId: string;
@@ -351,6 +358,8 @@ export type CurriculumDto = {
   name: string;
   description: string | null;
   isActive: boolean;
+  reviewLabel?: "PERLU VERIFIKASI" | null;
+  reviewNotes?: string[];
 };
 
 export type GradeReportPolicyStatus = "DRAFT" | "ACTIVE";
@@ -447,6 +456,11 @@ export type OptionItem = {
   label: string;
 };
 
+export type ClassOptionItem = OptionItem & {
+  concentrationId: string | null;
+  academicYearActive: boolean;
+};
+
 export type AcademicOptionsDto = {
   years: OptionItem[];
   periods: OptionItem[];
@@ -454,14 +468,23 @@ export type AcademicOptionsDto = {
   programs: OptionItem[];
   concentrations: OptionItem[];
   teachers: OptionItem[];
-  classes: OptionItem[];
+  classes: ClassOptionItem[];
   subjects: OptionItem[];
   members: OptionItem[];
   curricula: OptionItem[];
   planSlots: PlanSlotDto[];
 };
 
-export type ImportRowStatus = "VALID" | "DUPLIKAT" | "GAGAL";
+export type ImportRowStatus =
+  | "READY_CREATE"
+  | "READY_UPDATE"
+  | "NEEDS_REVIEW"
+  | "DUPLICATE"
+  | "REJECTED"
+  | "SKIPPED"
+  | "VALID"
+  | "DUPLIKAT"
+  | "GAGAL";
 
 export type ImportPreviewRow = {
   rowNumber: number;
@@ -469,6 +492,35 @@ export type ImportPreviewRow = {
   errors: string[];
   valid: boolean;
   status?: ImportRowStatus;
+  sheet?: string;
+};
+
+export type ImportSheetSummary = {
+  name: string;
+  role: "students" | "historical" | "skipped";
+  reason: string;
+  rowCount: number;
+};
+
+export type ImportClassCount = {
+  className: string;
+  count: number;
+};
+
+export type ImportClassMatch = {
+  sheet: string;
+  sourceName: string;
+  status: "MATCHED" | "MISSING" | "AMBIGUOUS";
+  classId: string | null;
+  className: string | null;
+  gradeLevel: number | null;
+  studentCount: number;
+};
+
+export type ImportReasonCount = {
+  status: string;
+  reason: string;
+  count: number;
 };
 
 export type ImportPreviewDto = {
@@ -478,15 +530,28 @@ export type ImportPreviewDto = {
   totalCount?: number;
   duplicateCount?: number;
   failedCount?: number;
+  reviewCount?: number;
+  skippedCount?: number;
+  createCount?: number;
+  updateCount?: number;
+  unmappedColumns?: string[];
+  sheets?: ImportSheetSummary[];
+  classCounts?: ImportClassCount[];
+  classMatches?: ImportClassMatch[];
+  reasonCounts?: ImportReasonCount[];
+  profilePersistence?: "available" | "unavailable";
 };
 
 export type ImportCommitDto = {
   created: number;
+  updated?: number;
   skipped: number;
   rows: ImportPreviewRow[];
   totalCount?: number;
   duplicateCount?: number;
   failedCount?: number;
+  reviewCount?: number;
+  skippedCount?: number;
 };
 
 export type GradeStatus = "DRAFT";
@@ -750,6 +815,7 @@ export type BkkJobPostDto = {
 export type AlumniTracerDto = {
   id: string;
   schoolId: string;
+  studentId: string | null;
   alumniName: string;
   graduationYear: number;
   majorName: string;

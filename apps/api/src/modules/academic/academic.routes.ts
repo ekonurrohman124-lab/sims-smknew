@@ -22,6 +22,7 @@ import {
   gradeWorkflowQuerySchema,
   homeroomSchema,
   idParamsSchema,
+  educationCalendarItemParamsSchema,
   importCommitSchema,
   studentTemplateQuerySchema,
   pageQuerySchema,
@@ -32,8 +33,14 @@ import {
   programSchema,
   schoolParamsSchema,
   semesterSchema,
+  educationCalendarApplySchema,
+  educationCalendarItemSchema,
+  educationCalendarNoteSchema,
+  studentListQuerySchema,
   studentSchema,
+  studentTransitionSchema,
   subjectSchema,
+  linkTeacherProfileSchema,
   teacherProfileSchema,
   teacherSchema,
   teacherWithAccountSchema,
@@ -93,8 +100,8 @@ import {
 } from "./catalog.service.ts";
 import { STUDENT_TEMPLATE, TEACHER_TEMPLATE, buildStudentTemplate, commitImport, previewImport } from "./import.service.ts";
 import { academicOptions } from "./options.service.ts";
-import { createStudent, createTeacher, deleteStudent, deleteTeacher, listStudents, listTeachers, updateStudent, updateTeacher } from "./people.service.ts";
-import { createTeacherWithAccount, provisionTeacherAccount, resetTeacherPassword, reviseTeacherProfile, unlinkTeacherAccount } from "./teacher-account.service.ts";
+import { createStudent, createTeacher, deleteStudent, deleteTeacher, listStudents, listTeachers, transitionStudents, updateStudent, updateTeacher } from "./people.service.ts";
+import { createTeacherWithAccount, linkTeacherProfile, provisionTeacherAccount, resetTeacherPassword, reviseTeacherProfile, unlinkTeacherAccount } from "./teacher-account.service.ts";
 import { OBJECTIVE_TEMPLATE, SCOPE_TEMPLATE, commitPlanImport, previewPlanImport } from "./plan-import.service.ts";
 import {
   createCurriculum,
@@ -114,6 +121,17 @@ import { decideCompetencyDescriptionRevision, getCompetencyDescriptions, getHome
 import { homeroomNoteCorrectSchema, homeroomNoteQuerySchema, homeroomNoteSaveSchema } from "./homeroom-note.schema.ts";
 import { correctHomeroomNote, finalizeHomeroomNote, getHomeroomNotes, saveHomeroomNoteDraft } from "./homeroom-note.service.ts";
 import { decideGradeRevision, getGradeSheet, listGradeWorkflows, requestGradeRevision, resolveLegacyGradeSubmission, saveGrades, submitGrades } from "./grade.service.ts";
+import { previewKaldik } from "./kaldik-lampung.ts";
+import {
+  addEducationCalendarNote,
+  applyEducationCalendar,
+  correctEducationCalendarItem,
+  educationCalendarDetail,
+  educationCalendarFile,
+  listEducationCalendar,
+  publishEducationCalendar,
+  uploadEducationCalendar,
+} from "./education-calendar.service.ts";
 import { assertCanCoordinate, assertCanManage, loadPlanAccess, loadScope } from "./scope.ts";
 
 function context(request: FastifyRequest) {
@@ -218,6 +236,69 @@ export async function academicRoutes(app: FastifyInstance): Promise<void> {
     return reply.status(204).send();
   });
 
+  app.get("/schools/:schoolId/kaldik-preview", { preHandler: requireAuth }, async (request) => {
+    const current = await readScope(app, request);
+    return { preview: await previewKaldik(app.prisma, current.params.schoolId) };
+  });
+
+  app.get("/schools/:schoolId/education-calendar", { preHandler: requireAuth }, async (request) => {
+    const current = await readScope(app, request);
+    return listEducationCalendar(app.prisma, current.auth, current.params.schoolId);
+  });
+  app.get("/schools/:schoolId/education-calendar/:id", { preHandler: requireAuth }, async (request) => {
+    const current = await readScope(app, request);
+    const params = parseInput(idParamsSchema, request.params);
+    return educationCalendarDetail(app.prisma, current.auth, params.schoolId, params.id);
+  });
+  app.get("/schools/:schoolId/education-calendar/:id/file", { preHandler: requireAuth }, async (request, reply) => {
+    const current = await readScope(app, request);
+    const params = parseInput(idParamsSchema, request.params);
+    const file = await educationCalendarFile(current.auth, params.schoolId, params.id);
+    return reply.header("Content-Type", file.document.mimeType).header("Content-Disposition", "attachment").send(file.content);
+  });
+  app.post("/schools/:schoolId/education-calendar", { preHandler: requireAuth }, async (request, reply) => {
+    const current = await manage(app, request);
+    let academicYearId = "";
+    let filename = "";
+    let mimetype = "";
+    let content: Buffer | null = null;
+    for await (const part of request.parts()) {
+      if (part.type === "file") {
+        filename = part.filename;
+        mimetype = part.mimetype;
+        content = await part.toBuffer();
+      } else if (part.fieldname === "academicYearId") {
+        academicYearId = String(part.value ?? "");
+      }
+    }
+    if (!content) throw new AppError(400, "VALIDATION_ERROR", "Berkas wajib diunggah.");
+    const result = await uploadEducationCalendar(app.prisma, current.auth, current.params.schoolId, academicYearId, { filename, mimetype, content });
+    return reply.status(result.duplicate ? 200 : 201).send(result);
+  });
+  app.patch("/schools/:schoolId/education-calendar/:id/items/:itemId", { preHandler: requireAuth }, async (request) => {
+    const current = await manage(app, request);
+    const params = parseInput(educationCalendarItemParamsSchema, request.params);
+    return correctEducationCalendarItem(current.auth, params.schoolId, params.id, params.itemId, parseInput(educationCalendarItemSchema, request.body ?? {}));
+  });
+  app.post("/schools/:schoolId/education-calendar/:id/notes", { preHandler: requireAuth }, async (request, reply) => {
+    const current = await readScope(app, request);
+    const params = parseInput(idParamsSchema, request.params);
+    const body = parseInput(educationCalendarNoteSchema, request.body ?? {});
+    const author = await app.prisma.user.findFirst({ where: { id: current.auth.userId }, select: { name: true } });
+    return reply.status(201).send(await addEducationCalendarNote(current.auth, params.schoolId, params.id, body.body, author?.name ?? "Pengguna"));
+  });
+  app.post("/schools/:schoolId/education-calendar/:id/publish", { preHandler: requireAuth }, async (request) => {
+    const current = await manage(app, request);
+    const params = parseInput(idParamsSchema, request.params);
+    return publishEducationCalendar(current.auth, params.schoolId, params.id);
+  });
+  app.post("/schools/:schoolId/education-calendar/:id/apply", { preHandler: requireAuth }, async (request) => {
+    const current = await manage(app, request);
+    const params = parseInput(idParamsSchema, request.params);
+    const body = parseInput(educationCalendarApplySchema, request.body ?? {});
+    return applyEducationCalendar(app.prisma, current.auth, params.schoolId, params.id, body.creates, current.meta);
+  });
+
   app.get("/schools/:schoolId/semesters", { preHandler: requireAuth }, async (request) => {
     const current = await readScope(app, request);
     return listSemesters(app.prisma, current.params.schoolId, current.query);
@@ -312,6 +393,11 @@ export async function academicRoutes(app: FastifyInstance): Promise<void> {
     const result = await createTeacherWithAccount(app.prisma, current.auth, current.params.schoolId, parseInput(teacherWithAccountSchema, request.body ?? {}), current.meta);
     return reply.status(result.created ? 201 : 200).send(result);
   });
+  app.post("/schools/:schoolId/teachers/link-profile", { preHandler: requireAuth }, async (request, reply) => {
+    const current = await manage(app, request);
+    const result = await linkTeacherProfile(app.prisma, current.auth, current.params.schoolId, parseInput(linkTeacherProfileSchema, request.body ?? {}), current.meta);
+    return reply.status(result.created ? 201 : 200).send(result);
+  });
   app.patch("/schools/:schoolId/teachers/:id", { preHandler: requireAuth }, async (request) => {
     const current = await manage(app, request);
     const params = parseInput(idParamsSchema, request.params);
@@ -347,7 +433,18 @@ export async function academicRoutes(app: FastifyInstance): Promise<void> {
 
   app.get("/schools/:schoolId/students", { preHandler: requireAuth }, async (request) => {
     const current = await readScope(app, request);
-    return listStudents(app.prisma, current.params.schoolId, current.scope, current.query);
+    const filters = parseInput(studentListQuerySchema, request.query);
+    return listStudents(app.prisma, current.params.schoolId, current.scope, { ...current.query, ...filters });
+  });
+  app.post("/schools/:schoolId/student-transitions", { preHandler: requireAuth }, async (request) => {
+    const current = await coordinate(app, request);
+    return transitionStudents(
+      app.prisma,
+      current.auth,
+      current.params.schoolId,
+      parseInput(studentTransitionSchema, request.body ?? {}),
+      current.meta,
+    );
   });
   app.post("/schools/:schoolId/students", { preHandler: requireAuth }, async (request, reply) => {
     const current = await manage(app, request);

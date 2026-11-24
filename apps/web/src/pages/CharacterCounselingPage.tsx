@@ -50,7 +50,10 @@ export function CharacterCounselingPage() {
     if (!schoolId) return;
     try {
       const [charRes, counsRes] = await Promise.all([
-        api<{ records: CharacterItem[] }>(`/api/v1/schools/${schoolId}/character-records`),
+        api<{ records: CharacterItem[] }>(`/api/v1/schools/${schoolId}/character-records`).catch((err: unknown) => {
+          if (err instanceof ApiClientError && err.status === 403) return { records: [] as CharacterItem[] };
+          throw err;
+        }),
         api<{ reports: CounselingItem[]; canManageAll: boolean }>(`/api/v1/schools/${schoolId}/counseling-reports`),
       ]);
       setRecords(charRes.records);

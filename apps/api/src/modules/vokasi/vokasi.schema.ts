@@ -37,6 +37,7 @@ export const createBkkJobSchema = z.object({
 });
 
 export const createAlumniTracerSchema = z.object({
+  studentId: z.string().trim().min(1).optional(),
   alumniName: z.string().trim().min(2).max(160),
   graduationYear: z.number().int().min(2000).max(2100),
   majorName: z.string().trim().min(2).max(120),

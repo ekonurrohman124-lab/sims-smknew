@@ -97,11 +97,30 @@ export const semesterSchema = z
     startDate: dateText,
     endDate: dateText,
     isActive: z.boolean(),
+    confirmUsedChange: z.boolean().optional(),
   })
   .refine((value) => value.endDate >= value.startDate, {
     message: "Tanggal selesai tidak boleh sebelum tanggal mulai.",
     path: ["endDate"],
   });
+
+export const educationCalendarItemSchema = z.object({
+  title: z.string().trim().min(3).max(180),
+  category: z.enum(["KEGIATAN", "LIBUR", "ASESMEN", "RAPOR", "SEMESTER"]),
+  semesterKind: z.enum(["GANJIL", "GENAP"]).nullable(),
+  eventDate: dateText.nullable(),
+  endDate: dateText.nullable(),
+  verification: z.enum(["TERVERIFIKASI", "PERLU_VERIFIKASI"]),
+});
+
+export const educationCalendarNoteSchema = z.object({
+  body: z.string().trim().min(8).max(500),
+});
+
+export const educationCalendarApplySchema = z.object({
+  confirm: z.literal(true),
+  creates: z.array(z.enum(["GANJIL", "GENAP"])).min(1).max(2),
+});
 
 export const fieldSchema = z.object({
   code: codeText,
@@ -147,6 +166,15 @@ export const teacherProfileSchema = teacherSchema.omit({ userId: true, email: tr
   roles: z.array(teacherAccountRole).min(1, "Pilih minimal satu peran.").max(2),
 });
 
+export const linkTeacherProfileSchema = z.object({
+  userId: z.string().trim().min(1).max(64),
+  name: z.string().trim().min(3).max(120),
+  gender: z.enum(["LAKI_LAKI", "PEREMPUAN"]),
+  nip: optionalNip,
+  nuptk: optionalDigits(16, "NUPTK harus berupa angka."),
+  phone: optionalText(32),
+});
+
 export const classSchema = z.object({
   academicYearId: z.string().trim().min(1),
   concentrationId: nullableString(z.string().min(1)),
@@ -169,6 +197,37 @@ export const studentSchema = z.object({
   concentrationId: nullableString(z.string().min(1)),
   isActive: z.boolean(),
 });
+
+const optionalListId = z.preprocess(
+  (value) => (value === undefined || value === null || value === "" ? undefined : value),
+  z.string().trim().min(1).max(64).optional(),
+) as z.ZodType<string | undefined>;
+
+export const studentListQuerySchema = z.object({
+  classId: optionalListId,
+  concentrationId: optionalListId,
+});
+
+export const studentTransitionSchema = z
+  .object({
+    mode: z.enum(["PROMOTE", "GRADUATE"]),
+    sourceClassId: z.string().trim().min(1).max(64),
+    targetClassId: z.string().trim().min(1).max(64).optional(),
+    graduationYear: z.coerce.number().int().min(2000).max(2100).optional(),
+    studentIds: z.array(z.string().trim().min(1).max(64)).min(1, "Pilih minimal satu siswa.").max(1000),
+  })
+  .superRefine((value, context) => {
+    if (value.mode === "PROMOTE") {
+      if (!value.targetClassId) {
+        context.addIssue({ code: z.ZodIssueCode.custom, path: ["targetClassId"], message: "Rombel tujuan wajib diisi." });
+      } else if (value.targetClassId === value.sourceClassId) {
+        context.addIssue({ code: z.ZodIssueCode.custom, path: ["targetClassId"], message: "Rombel tujuan harus berbeda dari kelas asal." });
+      }
+    }
+    if (value.mode === "GRADUATE" && value.graduationYear === undefined) {
+      context.addIssue({ code: z.ZodIssueCode.custom, path: ["graduationYear"], message: "Tahun lulus wajib diisi." });
+    }
+  });
 
 export const subjectSchema = z.object({
   code: codeText,
@@ -291,7 +350,7 @@ const importCell = z.record(z.string(), z.string());
 const importCommitRow = z.union([
   importCell,
   z.object({
-    rowNumber: z.number().int().positive().max(20000),
+    rowNumber: z.number().int().positive().max(100000),
     data: importCell,
   }),
 ]);
@@ -304,7 +363,7 @@ function isImportEnvelope(
 
 export const importCommitSchema = z
   .object({
-    rows: z.array(importCommitRow).max(1000, "Impor dibatasi 1.000 baris."),
+    rows: z.array(importCommitRow).max(4000, "Impor dibatasi 4.000 baris."),
     academicYearId: z.preprocess(
       (value) => (value === undefined || value === null || value === "" ? undefined : value),
       z.string().trim().min(1).max(64).optional(),
@@ -331,6 +390,12 @@ export const studentTemplateQuerySchema = z.object({
 export const idParamsSchema = z.object({
   schoolId: z.string().trim().min(1).max(64),
   id: z.string().trim().min(1).max(64),
+});
+
+export const educationCalendarItemParamsSchema = z.object({
+  schoolId: z.string().trim().min(1).max(64),
+  id: z.string().trim().min(1).max(64),
+  itemId: z.string().trim().min(1).max(64),
 });
 
 export const schoolParamsSchema = z.object({

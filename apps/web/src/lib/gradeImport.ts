@@ -14,10 +14,18 @@ export type DetectedImportColumn = {
   values: Record<string, string>;
 };
 
+export type GradeImportStats = {
+  accepted: number;
+  skippedEmpty: number;
+  rejectedInvalid: number;
+  unmatchedNames: string[];
+};
+
 export type ParsedWorkbookResult = {
   sheetNames: string[];
   columnsBySheet: Record<string, DetectedImportColumn[]>;
   allColumns: DetectedImportColumn[];
+  stats: GradeImportStats;
 };
 
 export function normalizeStudentName(value: string): string {
@@ -53,7 +61,7 @@ export function parseMatrixSheet(
   matrix: string[][],
   students: GradeSheetDto["students"],
   prefixSheet: boolean,
-): DetectedImportColumn[] {
+): { columns: DetectedImportColumn[]; stats: GradeImportStats } {
   const studentByNorm = new Map<string, { id: string; name: string }>();
   for (const st of students) {
     studentByNorm.set(normalizeStudentName(st.name), { id: st.id, name: st.name });
@@ -62,7 +70,7 @@ export function parseMatrixSheet(
   const headerIdx = matrix.findIndex((r) =>
     r.some((cell) => /nama\s*siswa|^nama$/i.test(String(cell ?? "").trim())),
   );
-  if (headerIdx < 0) return [];
+  if (headerIdx < 0) return { columns: [], stats: { accepted: 0, skippedEmpty: 0, rejectedInvalid: 0, unmatchedNames: [] } };
 
   const nameCol = matrix[headerIdx]!.findIndex((cell) =>
     /nama\s*siswa|^nama$/i.test(String(cell ?? "").trim()),
@@ -135,30 +143,46 @@ export function parseMatrixSheet(
 
   const colValues: Record<string, Record<string, string>> = {};
   for (const cand of candidates) colValues[cand.key] = {};
+  const unmatched = new Set<string>();
+  let skippedEmpty = 0;
+  let rejectedInvalid = 0;
 
   for (let r = headerIdx + 1; r < matrix.length; r += 1) {
     const row = matrix[r] ?? [];
     const rawName = String(row[nameCol] ?? "").replace(/\s+/g, " ").trim();
     if (!rawName) continue;
     const matchedStudent = studentByNorm.get(normalizeStudentName(rawName));
-    if (!matchedStudent) continue;
+    if (!matchedStudent) {
+      unmatched.add(rawName);
+      continue;
+    }
     for (const cand of candidates) {
       const rawCell = String(row[cand.colIndex] ?? "").replace(",", ".").trim();
-      if (rawCell === "") continue;
-      const num = Number(rawCell);
-      if (!Number.isNaN(num) && num >= 0 && num <= 100) {
-        const rounded = Math.round(num * 100) / 100;
-        colValues[cand.key]![matchedStudent.id] = String(rounded).replace(".", ",");
+      if (rawCell === "") {
+        skippedEmpty += 1;
+        continue;
       }
+      const num = Number(rawCell);
+      if (Number.isNaN(num) || num < 0 || num > 100) {
+        rejectedInvalid += 1;
+        continue;
+      }
+      const rounded = Math.round(num * 100) / 100;
+      colValues[cand.key]![matchedStudent.id] = String(rounded).replace(".", ",");
     }
   }
 
-  return candidates
+  const columns = candidates
     .map((cand) => {
       const vals = colValues[cand.key] ?? {};
       return { ...cand, matchedCount: Object.keys(vals).length, values: vals };
     })
     .filter((col) => col.matchedCount > 0 || col.category === "term");
+  const accepted = columns.reduce((sum, column) => sum + column.matchedCount, 0);
+  return {
+    columns,
+    stats: { accepted, skippedEmpty, rejectedInvalid, unmatchedNames: [...unmatched] },
+  };
 }
 
 export async function parseGradeFile(
@@ -171,6 +195,7 @@ export async function parseGradeFile(
     const wb = XLSX.read(buffer, { type: "array" });
     const columnsBySheet: Record<string, DetectedImportColumn[]> = {};
     const allColumns: DetectedImportColumn[] = [];
+    const stats = emptyImportStats();
     const multi = wb.SheetNames.length > 1;
     const seenTerm = new Set<string>();
 
@@ -180,9 +205,10 @@ export async function parseGradeFile(
       const matrix = XLSX.utils.sheet_to_json<unknown[]>(ws, { header: 1, defval: "" }).map((r) =>
         (r ?? []).map((c) => String(c ?? "")),
       );
-      const singleCols = parseMatrixSheet(name, matrix, students, false);
-      columnsBySheet[name] = singleCols;
-      const prefixedCols = parseMatrixSheet(name, matrix, students, multi);
+      const parsed = parseMatrixSheet(name, matrix, students, false);
+      columnsBySheet[name] = parsed.columns;
+      addImportStats(stats, parsed.stats);
+      const prefixedCols = parseMatrixSheet(name, matrix, students, multi).columns;
       for (const col of prefixedCols) {
         if (col.category === "term") {
           if (seenTerm.has(col.field) && col.matchedCount === 0) continue;
@@ -191,13 +217,26 @@ export async function parseGradeFile(
         allColumns.push(col);
       }
     }
-    return { sheetNames: wb.SheetNames, columnsBySheet, allColumns };
+    return { sheetNames: wb.SheetNames, columnsBySheet, allColumns, stats };
   }
 
   const content = await file.text();
   const lines = content.split(/\r?\n/).filter((l) => l.trim() !== "");
   const delim = (lines[0] ?? "").includes("\t") ? "\t" : (lines[0] ?? "").includes(";") ? ";" : ",";
   const matrix = lines.map((l) => splitDelimitedLine(l, delim));
-  const cols = parseMatrixSheet("CSV", matrix, students, false);
-  return { sheetNames: ["CSV"], columnsBySheet: { CSV: cols }, allColumns: cols };
+  const parsed = parseMatrixSheet("CSV", matrix, students, false);
+  return { sheetNames: ["CSV"], columnsBySheet: { CSV: parsed.columns }, allColumns: parsed.columns, stats: parsed.stats };
+}
+
+function emptyImportStats(): GradeImportStats {
+  return { accepted: 0, skippedEmpty: 0, rejectedInvalid: 0, unmatchedNames: [] };
+}
+
+function addImportStats(target: GradeImportStats, next: GradeImportStats): void {
+  target.accepted += next.accepted;
+  target.skippedEmpty += next.skippedEmpty;
+  target.rejectedInvalid += next.rejectedInvalid;
+  for (const name of next.unmatchedNames) {
+    if (!target.unmatchedNames.includes(name)) target.unmatchedNames.push(name);
+  }
 }

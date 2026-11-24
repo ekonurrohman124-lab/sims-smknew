@@ -470,6 +470,14 @@ model Student {
   classId          String?
   concentrationId  String?
   isActive         Boolean   @default(true)
+  fatherName       String?   @db.VarChar(120)
+  motherName       String?   @db.VarChar(120)
+  nik              String?   @unique @db.VarChar(16)
+  familyCardNo     String?   @db.VarChar(16)
+  originSchool     String?   @db.VarChar(160)
+  religion         String?   @db.VarChar(40)
+  address          String?   @db.VarChar(300)
+  studentNote      String?   @db.VarChar(300)
   createdAt        DateTime  @default(now())
   updatedAt        DateTime  @updatedAt
 
@@ -495,6 +503,7 @@ model Student {
   payments                     StudentPayment[]
   internshipPlacements         InternshipPlacement[]
   internshipLogs               InternshipLog[]
+  alumniTracers                AlumniTracer[]
 
   @@unique([schoolId, nis])
   @@index([schoolId, name])
@@ -1714,6 +1723,7 @@ model BkkJobPost {
 model AlumniTracer {
   id              String       @id @default(cuid())
   schoolId        String
+  studentId       String?
   alumniName      String       @db.VarChar(160)
   graduationYear  Int
   majorName       String       @db.VarChar(120)
@@ -1724,8 +1734,10 @@ model AlumniTracer {
   createdAt       DateTime     @default(now())
   updatedAt       DateTime     @updatedAt
 
-  school School @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  school  School   @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  student Student? @relation(fields: [studentId], references: [id], onDelete: SetNull)
 
+  @@unique([schoolId, studentId, graduationYear])
   @@index([schoolId, graduationYear, status])
 }
 

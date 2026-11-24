@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { AppPageShell } from "../components/shell/AppPageShell.tsx";
 import { ApiClientError, api } from "../lib/api.ts";
@@ -6,6 +6,25 @@ import { useSchoolScope } from "../lib/school.tsx";
 
 type ClassItem = { id: string; name: string; gradeLevel: number; academicYearName?: string; concentrationId?: string | null; concentrationName?: string | null };
 type StudentRow = { id: string; name: string; nisn: string; nis: string | null; gender: string; classId: string | null; concentrationId?: string | null; isActive?: boolean };
+type TransitionResult = {
+  succeeded: Array<{ studentId: string; name: string }>;
+  failed: Array<{ studentId: string; name: string | null; reason: string }>;
+};
+
+async function fetchAll<T>(base: string): Promise<T[]> {
+  const items: T[] = [];
+  let total = Number.POSITIVE_INFINITY;
+  let page = 1;
+  while (items.length < total && page <= 100) {
+    const joiner = base.includes("?") ? "&" : "?";
+    const res = await api<{ items: T[]; total: number }>(`${base}${joiner}page=${page}&pageSize=50`);
+    total = res.total;
+    items.push(...res.items);
+    if (res.items.length === 0) break;
+    page += 1;
+  }
+  return items;
+}
 
 export function StudentPromotionPage() {
   const { schoolId } = useSchoolScope();
@@ -18,19 +37,19 @@ export function StudentPromotionPage() {
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [loadingStudents, setLoadingStudents] = useState(false);
   const [processing, setProcessing] = useState(false);
-  const [progress, setProgress] = useState({ done: 0, total: 0 });
   const [notice, setNotice] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
+  const busy = useRef(false);
 
   const loadClasses = useCallback(async () => {
     if (!schoolId) return;
     try {
-      const res = await api<{ items: ClassItem[] }>(`/api/v1/schools/${schoolId}/classes?page=1&pageSize=50`);
-      setClasses(res.items);
-      if (!sourceClassId && res.items[0]) setSourceClassId(res.items[0].id);
+      const items = await fetchAll<ClassItem>(`/api/v1/schools/${schoolId}/classes`);
+      setClasses(items);
+      setSourceClassId((current) => current || items[0]?.id || "");
     } catch (err) {
       setNotice({ kind: "err", text: err instanceof ApiClientError ? err.message : "Daftar kelas gagal dimuat." });
     }
-  }, [schoolId, sourceClassId]);
+  }, [schoolId]);
 
   useEffect(() => { void loadClasses(); }, [loadClasses]);
 
@@ -46,13 +65,18 @@ export function StudentPromotionPage() {
     if (!schoolId || !sourceClassId) { setStudents([]); setSelectedIds(new Set()); return; }
     let active = true;
     setLoadingStudents(true);
-    api<{ items: StudentRow[] }>(`/api/v1/schools/${schoolId}/students?classId=${sourceClassId}&page=1&pageSize=50`)
-      .then((res) => {
+    fetchAll<StudentRow>(`/api/v1/schools/${schoolId}/students?classId=${encodeURIComponent(sourceClassId)}`)
+      .then((items) => {
         if (!active) return;
-        setStudents(res.items);
-        setSelectedIds(new Set(res.items.map((s) => s.id)));
+        setStudents(items);
+        setSelectedIds(new Set(items.map((s) => s.id)));
       })
-      .catch(() => { if (active) { setStudents([]); setSelectedIds(new Set()); } })
+      .catch((err) => {
+        if (!active) return;
+        setStudents([]);
+        setSelectedIds(new Set());
+        setNotice({ kind: "err", text: err instanceof ApiClientError ? err.message : "Daftar siswa gagal dimuat." });
+      })
       .finally(() => { if (active) setLoadingStudents(false); });
     return () => { active = false; };
   }, [schoolId, sourceClassId]);
@@ -67,59 +91,44 @@ export function StudentPromotionPage() {
   }
 
   async function runRollover() {
-    if (!schoolId || !sourceClass || selectedIds.size === 0) return;
+    if (busy.current || !schoolId || !sourceClass || selectedIds.size === 0) return;
     if (mode === "PROMOTE" && (!targetClassId || targetClassId === sourceClassId)) {
       setNotice({ kind: "err", text: "Pilih rombel tujuan yang berbeda dari kelas asal." });
       return;
     }
-    const list = students.filter((s) => selectedIds.has(s.id));
+    const year = Number(gradYear);
+    if (mode === "GRADUATE" && (!Number.isInteger(year) || year < 2000 || year > 2100)) {
+      setNotice({ kind: "err", text: "Tahun lulus harus antara 2000 dan 2100." });
+      return;
+    }
+    const studentIds = students.filter((student) => selectedIds.has(student.id)).map((student) => student.id);
+    busy.current = true;
     setProcessing(true);
     setNotice(null);
-    setProgress({ done: 0, total: list.length });
-    let success = 0;
-
-    for (const st of list) {
-      try {
-        const body =
-          mode === "PROMOTE"
-            ? {
-                name: st.name,
-                nisn: st.nisn,
-                nis: st.nis,
-                gender: st.gender,
-                classId: targetClassId,
-                concentrationId: targetClass?.concentrationId ?? st.concentrationId ?? null,
-                isActive: true,
-              }
-            : {
-                name: st.name,
-                nisn: st.nisn,
-                nis: st.nis,
-                gender: st.gender,
-                classId: null,
-                concentrationId: st.concentrationId ?? sourceClass.concentrationId ?? null,
-                isActive: false,
-              };
-        await api(`/api/v1/schools/${schoolId}/students/${st.id}`, { method: "PATCH", body: JSON.stringify(body) });
-        success++;
-      } catch {
-        // lanjutkan siswa berikutnya
-      }
-      setProgress((p) => ({ ...p, done: p.done + 1 }));
+    try {
+      const result = await api<TransitionResult>(`/api/v1/schools/${schoolId}/student-transitions`, {
+        method: "POST",
+        body: JSON.stringify({
+          mode,
+          sourceClassId,
+          ...(mode === "PROMOTE" ? { targetClassId } : { graduationYear: year }),
+          studentIds,
+        }),
+      });
+      const reasons = result.failed.slice(0, 5).map((item) => `${item.name ?? "Siswa"}: ${item.reason}`).join("; ");
+      const summary = mode === "PROMOTE"
+        ? `Naik kelas ${sourceClass.name} ke ${targetClass?.name ?? "rombel tujuan"}: berhasil ${result.succeeded.length}, gagal ${result.failed.length}.`
+        : `Kelulusan ${sourceClass.name} angkatan ${year}: berhasil ${result.succeeded.length}, gagal ${result.failed.length}.`;
+      setNotice({ kind: result.failed.length === 0 ? "ok" : "err", text: reasons ? `${summary} ${reasons}` : summary });
+    } catch (err) {
+      setNotice({ kind: "err", text: err instanceof ApiClientError ? err.message : "Transisi siswa gagal diproses." });
+    } finally {
+      busy.current = false;
+      setProcessing(false);
+      const refreshed = await fetchAll<StudentRow>(`/api/v1/schools/${schoolId}/students?classId=${encodeURIComponent(sourceClassId)}`).catch(() => []);
+      setStudents(refreshed);
+      setSelectedIds(new Set(refreshed.map((student) => student.id)));
     }
-
-    setProcessing(false);
-    setNotice({
-      kind: success > 0 ? "ok" : "err",
-      text:
-        mode === "PROMOTE"
-          ? `${success} dari ${list.length} siswa berhasil dinaikkan dari ${sourceClass.name} ke ${targetClass?.name ?? "rombel baru"}.`
-          : `${success} dari ${list.length} siswa ${sourceClass.name} resmi diluluskan menjadi Alumni Angkatan ${gradYear}.`,
-    });
-    setSourceClassId((prev) => prev);
-    const refreshed = await api<{ items: StudentRow[] }>(`/api/v1/schools/${schoolId}/students?classId=${sourceClassId}&page=1&pageSize=50`).catch(() => ({ items: [] }));
-    setStudents(refreshed.items);
-    setSelectedIds(new Set(refreshed.items.map((s) => s.id)));
   }
 
   return (
@@ -249,15 +258,7 @@ export function StudentPromotionPage() {
         </div>
 
         {processing && (
-          <div className="mt-4">
-            <div className="mb-1 flex justify-between text-xs font-semibold text-slate-600">
-              <span>Memproses transisi data siswa...</span>
-              <span>{progress.done}/{progress.total}</span>
-            </div>
-            <div className="h-2 overflow-hidden rounded-full bg-slate-100">
-              <div className="h-full bg-[#0D1B4C] transition-all" style={{ width: `${progress.total ? (progress.done / progress.total) * 100 : 0}%` }} />
-            </div>
-          </div>
+          <p className="mt-4 text-xs font-semibold text-slate-600">Memproses transisi data siswa...</p>
         )}
 
         <div className="mt-4 flex justify-end">

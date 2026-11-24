@@ -4,7 +4,7 @@ import type { AuthState } from "../../lib/auth-state.ts";
 import { AppError } from "../../lib/errors.ts";
 import { assertSchoolAccess, assertSchoolRole, type RequestMeta } from "../../lib/tenant.ts";
 
-const COUNSELING_STAFF_ROLES = ["ADMIN_SEKOLAH", "KEPALA_SEKOLAH", "WAKAKUR", "WALI_KELAS", "TU"] as const;
+const COUNSELING_STAFF_ROLES = ["ADMIN_SEKOLAH", "KEPALA_SEKOLAH", "WAKAKUR", "WALI_KELAS", "TU", "WAKA_KESISWAAN"] as const;
 
 export async function listCharacterRecords(
   prisma: PrismaClient,
@@ -12,7 +12,7 @@ export async function listCharacterRecords(
   schoolId: string,
   meta: RequestMeta,
 ) {
-  await assertSchoolAccess(prisma, auth, schoolId, meta);
+  await assertSchoolRole(prisma, auth, schoolId, COUNSELING_STAFF_ROLES, meta);
   const records = await prisma.studentCharacterRecord.findMany({
     where: { schoolId },
     include: {
@@ -57,7 +57,7 @@ export async function createCharacterRecord(
   },
   meta: RequestMeta,
 ) {
-  await assertSchoolAccess(prisma, auth, schoolId, meta);
+  await assertSchoolRole(prisma, auth, schoolId, COUNSELING_STAFF_ROLES, meta);
   const student = await prisma.student.findFirst({
     where: { id: input.studentId, schoolId },
     select: { id: true, name: true },
@@ -143,7 +143,7 @@ export async function listCounselingReports(
     canManageAll,
     reports: reports.map((rep) => ({
       ...rep,
-      reporterUserId: rep.isAnonymous && !canManageAll ? null : rep.reporterUserId,
+      reporterUserId: rep.isAnonymous ? null : rep.reporterUserId,
       reporterLabel: rep.isAnonymous ? "Anonim (Dilindungi)" : "Terdaftar",
     })),
   };
@@ -217,5 +217,10 @@ export async function updateCounselingReport(
     },
   });
 
-  return { report };
+  return {
+    report: {
+      ...report,
+      reporterUserId: report.isAnonymous ? null : report.reporterUserId,
+    },
+  };
 }

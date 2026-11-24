@@ -3,9 +3,10 @@ import type { PrismaClient } from "@prisma/client";
 import { writeAudit } from "../../lib/audit.ts";
 import type { AuthState } from "../../lib/auth-state.ts";
 import { AppError } from "../../lib/errors.ts";
+import { MSG } from "../../lib/messages.ts";
 import { assertSchoolAccess, assertSchoolRole, type RequestMeta } from "../../lib/tenant.ts";
 
-const FINANCE_STAFF_ROLES = ["ADMIN_SEKOLAH", "KEPALA_SEKOLAH", "TU"] as const;
+const FINANCE_STAFF_ROLES = ["ADMIN_SEKOLAH", "KEPALA_SEKOLAH", "TU", "BENDAHARA"] as const;
 
 export async function listBills(
   prisma: PrismaClient,
@@ -37,6 +38,9 @@ export async function listBills(
   });
 
   const linkedStudentIds = linkedStudents.map((l) => l.student.id);
+  if (!canManageFinance && linkedStudentIds.length === 0) {
+    throw new AppError(403, "TENANT_FORBIDDEN", MSG.tenant);
+  }
 
   const bills = await prisma.studentBill.findMany({
     where: {
@@ -224,11 +228,12 @@ export async function handlePaymentGatewayWebhook(
   meta: RequestMeta,
 ) {
   const secret = process.env.PAYMENT_WEBHOOK_SECRET;
-  if (secret) {
-    const expected = crypto.createHmac("sha256", secret).update(rawBody).digest("hex");
-    if (!signatureHeader || signatureHeader !== expected) {
-      throw new AppError(401, "INVALID_WEBHOOK_SIGNATURE", "Signature webhook payment gateway tidak valid.");
-    }
+  if (!secret) {
+    throw new AppError(401, "INVALID_WEBHOOK_SIGNATURE", "Signature webhook payment gateway tidak valid.");
+  }
+  const expected = crypto.createHmac("sha256", secret).update(rawBody).digest("hex");
+  if (!signatureHeader || signatureHeader !== expected) {
+    throw new AppError(401, "INVALID_WEBHOOK_SIGNATURE", "Signature webhook payment gateway tidak valid.");
   }
 
   const normalized = payload.transactionStatus.toUpperCase();

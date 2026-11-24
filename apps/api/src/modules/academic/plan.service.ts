@@ -16,6 +16,12 @@ import {
   type PageQuery,
 } from "./common.ts";
 import type { PlanAccess } from "./scope.ts";
+import { curriculumBlueprint, curriculumReviewNotes } from "./vocational-master.catalog.ts";
+
+function curriculumReview(code: string): Pick<CurriculumDto, "reviewLabel" | "reviewNotes"> {
+  if (code !== curriculumBlueprint.code) return { reviewLabel: null, reviewNotes: [] };
+  return { reviewLabel: "PERLU VERIFIKASI", reviewNotes: [...curriculumReviewNotes] };
+}
 
 type CurriculumInput = {
   academicYearId: string;
@@ -160,6 +166,7 @@ export async function listCurricula(
       name: row.name,
       description: row.description,
       isActive: row.isActive,
+      ...curriculumReview(row.code),
     })),
     total,
     page: query.page,
@@ -193,6 +200,7 @@ export async function createCurriculum(
       name: row.name,
       description: row.description,
       isActive: row.isActive,
+      ...curriculumReview(row.code),
     };
   } catch (error) {
     rethrowKnown(error, "Kode kurikulum sudah digunakan pada tahun pelajaran ini.");
@@ -228,6 +236,7 @@ export async function updateCurriculum(
       name: row.name,
       description: row.description,
       isActive: row.isActive,
+      ...curriculumReview(row.code),
     };
   } catch (error) {
     rethrowKnown(error, "Kode kurikulum sudah digunakan pada tahun pelajaran ini.");

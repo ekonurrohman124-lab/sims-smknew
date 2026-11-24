@@ -10,3 +10,31 @@ coverage/
 *.log
 .DS_Store
 Thumbs.db
+
+# Database backups
+*.dump
+*.backup
+*.sql.gz
+*.sqlite
+*.sqlite3
+
+# Local student data
+*.xlsx
+*.xls
+*.csv
+
+# Android generated files
+*.apk
+*.aab
+.gradle/
+.kotlin/
+local.properties
+
+# Private keys and signing credentials
+*.jks
+*.keystore
+*.pem
+*.p12
+key.properties
+keystore.properties
+

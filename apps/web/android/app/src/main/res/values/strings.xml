@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">SMART SMK</string>
+    <string name="title_activity_main">SMART SMK</string>
+    <string name="package_name">id.sch.smartsmk</string>
+    <string name="custom_url_scheme">id.sch.smartsmk</string>
+</resources>

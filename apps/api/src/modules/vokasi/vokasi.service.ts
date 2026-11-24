@@ -5,23 +5,44 @@ import type { AuthState } from "../../lib/auth-state.ts";
 import { AppError } from "../../lib/errors.ts";
 import { assertSchoolRole, type RequestMeta } from "../../lib/tenant.ts";
 
-const SCHOOL_STAFF_ROLES: RoleCode[] = [
-  "SYSTEM_OWNER",
+const VOKASI_READ_ROLES: RoleCode[] = [
   "ADMIN_SEKOLAH",
   "TU",
   "KEPALA_SEKOLAH",
   "WAKAKUR",
   "GURU_MAPEL",
   "WALI_KELAS",
+  "KAPROG",
+  "WAKA_SARPRAS",
+  "WAKA_HUMAS",
+  "WAKA_KESISWAAN",
 ];
 
-const VOKASI_ADMIN_ROLES: RoleCode[] = [
-  "SYSTEM_OWNER",
+const INVENTORY_WRITE_ROLES: RoleCode[] = [
+  "ADMIN_SEKOLAH",
+  "TU",
+  "KEPALA_SEKOLAH",
+  "KAPROG",
+  "WAKA_SARPRAS",
+];
+
+const TOOL_LOAN_ROLES: RoleCode[] = [
+  "ADMIN_SEKOLAH",
+  "TU",
+  "KEPALA_SEKOLAH",
+  "KAPROG",
+  "WAKA_SARPRAS",
+  "GURU_MAPEL",
+  "WALI_KELAS",
+];
+
+const BKK_WRITE_ROLES: RoleCode[] = [
   "ADMIN_SEKOLAH",
   "TU",
   "KEPALA_SEKOLAH",
   "WAKAKUR",
-  "GURU_MAPEL",
+  "WAKA_HUMAS",
+  "KAPROG",
 ];
 
 export async function listWorkshopTools(
@@ -30,7 +51,7 @@ export async function listWorkshopTools(
   schoolId: string,
   meta: RequestMeta
 ) {
-  await assertSchoolRole(prisma, auth, schoolId, SCHOOL_STAFF_ROLES, meta);
+  await assertSchoolRole(prisma, auth, schoolId, VOKASI_READ_ROLES, meta);
   const tools = await prisma.workshopTool.findMany({
     where: { schoolId },
     orderBy: [{ labName: "asc" }, { name: "asc" }],
@@ -56,7 +77,7 @@ export async function createWorkshopTool(
   },
   meta: RequestMeta
 ) {
-  await assertSchoolRole(prisma, auth, schoolId, VOKASI_ADMIN_ROLES, meta);
+  await assertSchoolRole(prisma, auth, schoolId, INVENTORY_WRITE_ROLES, meta);
   const exists = await prisma.workshopTool.findUnique({
     where: { schoolId_assetCode: { schoolId, assetCode: input.assetCode } },
   });
@@ -99,7 +120,7 @@ export async function listToolLoans(
   schoolId: string,
   meta: RequestMeta
 ) {
-  await assertSchoolRole(prisma, auth, schoolId, SCHOOL_STAFF_ROLES, meta);
+  await assertSchoolRole(prisma, auth, schoolId, VOKASI_READ_ROLES, meta);
   const loans = await prisma.toolLoan.findMany({
     where: { schoolId },
     include: {
@@ -135,7 +156,7 @@ export async function createToolLoan(
   },
   meta: RequestMeta
 ) {
-  await assertSchoolRole(prisma, auth, schoolId, VOKASI_ADMIN_ROLES, meta);
+  await assertSchoolRole(prisma, auth, schoolId, TOOL_LOAN_ROLES, meta);
   const qty = input.qty ?? 1;
 
   const loan = await prisma.$transaction(async (tx) => {
@@ -203,7 +224,7 @@ export async function returnToolLoan(
   loanId: string,
   meta: RequestMeta
 ) {
-  await assertSchoolRole(prisma, auth, schoolId, VOKASI_ADMIN_ROLES, meta);
+  await assertSchoolRole(prisma, auth, schoolId, INVENTORY_WRITE_ROLES, meta);
   const updated = await prisma.$transaction(async (tx) => {
     const existing = await tx.toolLoan.findFirst({
       where: { id: loanId, schoolId },
@@ -260,7 +281,7 @@ export async function listBkkJobs(
   schoolId: string,
   meta: RequestMeta
 ) {
-  await assertSchoolRole(prisma, auth, schoolId, SCHOOL_STAFF_ROLES, meta);
+  await assertSchoolRole(prisma, auth, schoolId, VOKASI_READ_ROLES, meta);
   const jobs = await prisma.bkkJobPost.findMany({
     where: { schoolId },
     orderBy: { createdAt: "desc" },
@@ -287,7 +308,7 @@ export async function createBkkJob(
   },
   meta: RequestMeta
 ) {
-  await assertSchoolRole(prisma, auth, schoolId, VOKASI_ADMIN_ROLES, meta);
+  await assertSchoolRole(prisma, auth, schoolId, BKK_WRITE_ROLES, meta);
   const created = await prisma.bkkJobPost.create({
     data: {
       schoolId,
@@ -323,7 +344,7 @@ export async function listAlumniTracers(
   schoolId: string,
   meta: RequestMeta
 ) {
-  await assertSchoolRole(prisma, auth, schoolId, SCHOOL_STAFF_ROLES, meta);
+  await assertSchoolRole(prisma, auth, schoolId, VOKASI_READ_ROLES, meta);
   const items = await prisma.alumniTracer.findMany({
     where: { schoolId },
     orderBy: [{ graduationYear: "desc" }, { alumniName: "asc" }],
@@ -339,6 +360,7 @@ export async function createAlumniTracer(
   auth: AuthState,
   schoolId: string,
   input: {
+    studentId?: string;
     alumniName: string;
     graduationYear: number;
     majorName: string;
@@ -349,10 +371,23 @@ export async function createAlumniTracer(
   },
   meta: RequestMeta
 ) {
-  await assertSchoolRole(prisma, auth, schoolId, VOKASI_ADMIN_ROLES, meta);
+  await assertSchoolRole(prisma, auth, schoolId, BKK_WRITE_ROLES, meta);
+  if (input.studentId) {
+    const student = await prisma.student.findFirst({
+      where: { id: input.studentId, schoolId },
+      select: { id: true },
+    });
+    if (!student) throw new AppError(404, "STUDENT_NOT_FOUND", "Siswa tidak ditemukan pada sekolah ini.");
+    const existing = await prisma.alumniTracer.findFirst({
+      where: { schoolId, studentId: student.id, graduationYear: input.graduationYear },
+      select: { id: true },
+    });
+    if (existing) throw new AppError(409, "ALUMNI_TRACER_EXISTS", "Tracer kelulusan siswa ini sudah ada.");
+  }
   const created = await prisma.alumniTracer.create({
     data: {
       schoolId,
+      studentId: input.studentId ?? null,
       alumniName: input.alumniName,
       graduationYear: input.graduationYear,
       majorName: input.majorName,
@@ -361,6 +396,11 @@ export async function createAlumniTracer(
       positionOrStudy: input.positionOrStudy ?? null,
       phone: input.phone ?? null,
     },
+  }).catch((error: unknown) => {
+    if (typeof error === "object" && error !== null && "code" in error && (error as { code?: string }).code === "P2002") {
+      throw new AppError(409, "ALUMNI_TRACER_EXISTS", "Tracer kelulusan siswa ini sudah ada.");
+    }
+    throw error;
   });
   await writeAudit(prisma, {
     actorId: auth.userId,

@@ -37,6 +37,7 @@ export function VokasiPage({ mode }: { mode: "inventaris" | "bkk" }) {
   const [contactInfo, setContactInfo] = useState("");
 
   const [alumniName, setAlumniName] = useState("");
+  const [tracerStudentId, setTracerStudentId] = useState<string | null>(null);
   const [graduationYear, setGraduationYear] = useState(new Date().getFullYear());
   const [majorName, setMajorName] = useState("");
   const [tracerStatus, setTracerStatus] = useState<"BEKERJA" | "WIRAUSAHA" | "KULIAH" | "BELUM_BEKERJA">("BEKERJA");
@@ -76,15 +77,23 @@ export function VokasiPage({ mode }: { mode: "inventaris" | "bkk" }) {
     setLoading(true);
     setError(null);
     try {
-      const [jobList, tracerList, studentRes] = await Promise.all([
+      const [jobList, tracerList] = await Promise.all([
         api<BkkJobPostDto[]>(`/api/v1/schools/${schoolId}/vokasi/bkk-jobs`),
         api<AlumniTracerDto[]>(`/api/v1/schools/${schoolId}/vokasi/tracer-study`),
-        api<{ items: Array<{ id: string; name: string; nisn: string; concentrationName?: string | null; className?: string | null; isActive?: boolean }> }>(`/api/v1/schools/${schoolId}/students?page=1&pageSize=50`).catch(() => ({ items: [] })),
       ]);
+      const students: Array<{ id: string; name: string; nisn: string; concentrationName?: string | null; className?: string | null; isActive?: boolean }> = [];
+      let page = 1;
+      let total = 0;
+      do {
+        const studentRes = await api<{ items: typeof students; total: number }>(`/api/v1/schools/${schoolId}/students?page=${page}&pageSize=50`);
+        students.push(...studentRes.items);
+        total = studentRes.total;
+        page += 1;
+      } while (students.length < total && page <= 100);
       setJobs(jobList);
       setTracers(tracerList);
-      const tracedNames = new Set(tracerList.map((t) => t.alumniName.trim().toLowerCase()));
-      setGraduatedStudents(studentRes.items.filter((st) => (st.isActive === false || !st.className) && !tracedNames.has(st.name.trim().toLowerCase())));
+      const tracedStudentIds = new Set(tracerList.flatMap((tracer) => tracer.studentId ? [tracer.studentId] : []));
+      setGraduatedStudents(students.filter((st) => (st.isActive === false || !st.className) && !tracedStudentIds.has(st.id)));
     } catch (err) {
       setError(err instanceof ApiClientError ? err.message : "Gagal memuat data BKK & Tracer Study.");
     } finally {
@@ -216,6 +225,7 @@ export function VokasiPage({ mode }: { mode: "inventaris" | "bkk" }) {
       await api<AlumniTracerDto>(`/api/v1/schools/${schoolId}/vokasi/tracer-study`, {
         method: "POST",
         body: JSON.stringify({
+          studentId: tracerStudentId ?? undefined,
           alumniName,
           graduationYear,
           majorName,
@@ -225,6 +235,7 @@ export function VokasiPage({ mode }: { mode: "inventaris" | "bkk" }) {
           phone: phone.trim() || undefined,
         }),
       });
+      setTracerStudentId(null);
       setAlumniName("");
       setInstitutionName("");
       setPositionOrStudy("");
@@ -673,6 +684,7 @@ export function VokasiPage({ mode }: { mode: "inventaris" | "bkk" }) {
                       key={st.id}
                       type="button"
                       onClick={() => {
+                        setTracerStudentId(st.id);
                         setAlumniName(st.name);
                         if (st.concentrationName) setMajorName(st.concentrationName);
                         setGraduationYear(new Date().getFullYear());
@@ -691,7 +703,10 @@ export function VokasiPage({ mode }: { mode: "inventaris" | "bkk" }) {
                 <input
                   required
                   value={alumniName}
-                  onChange={(e) => setAlumniName(e.target.value)}
+                  onChange={(e) => {
+                    setAlumniName(e.target.value);
+                    setTracerStudentId(null);
+                  }}
                   className="mt-1 w-full h-12 rounded-2xl border border-slate-200 bg-slate-50 px-4 text-sm outline-none focus:border-[#0D1B4C] focus:bg-white"
                 />
               </div>

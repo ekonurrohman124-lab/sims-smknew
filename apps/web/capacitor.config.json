@@ -1,0 +1,9 @@
+{
+  "appId": "id.sch.smartsmk",
+  "appName": "SMART SMK",
+  "webDir": "dist",
+  "server": {
+    "url": "http://192.168.1.16:5173",
+    "cleartext": true
+  }
+}

@@ -1,6 +1,7 @@
-import type { PageResult, StudentDto, TeacherDto } from "@sims/shared";
+import type { PageResult, StudentDto, TeacherDto, TeacherRosterDto } from "@sims/shared";
 import type { Prisma, PrismaClient } from "@prisma/client";
 import type { AuthState } from "../../lib/auth-state.ts";
+import { writeAudit } from "../../lib/audit.ts";
 import { AppError } from "../../lib/errors.ts";
 import type { RequestMeta } from "../../lib/tenant.ts";
 import {
@@ -127,30 +128,100 @@ export async function findTeacherDto(prisma: PrismaClient, schoolId: string, id:
   return toTeacher(row);
 }
 
+const TEACHING_ROLE_LIST = ["GURU_MAPEL", "WALI_KELAS"] as const;
+
+function rosterFromTeacher(row: Parameters<typeof toTeacher>[0]): TeacherRosterDto {
+  return { ...toTeacher(row), linkStatus: row.userId ? "TERHUBUNG" : null };
+}
+
+function rosterFromAccount(schoolId: string, user: {
+  id: string;
+  name: string;
+  email: string;
+  isActive: boolean;
+  assignments: Array<{ role: { code: string } }>;
+}): TeacherRosterDto {
+  return {
+    id: user.id,
+    schoolId,
+    userId: user.id,
+    userName: user.name,
+    loginEmail: user.email,
+    roleCodes: user.assignments
+      .map((assignment) => assignment.role.code)
+      .filter((code): code is "GURU_MAPEL" | "WALI_KELAS" => TEACHER_ROLE_CODES.has(code)),
+    nip: null,
+    nuptk: null,
+    name: user.name,
+    gender: null,
+    email: user.email,
+    phone: null,
+    isActive: user.isActive,
+    linkStatus: "BELUM_TERHUBUNG",
+  };
+}
+
 export async function listTeachers(
   prisma: PrismaClient,
   schoolId: string,
   scope: DataScope,
   query: PageQuery,
-): Promise<PageResult<TeacherDto>> {
-  if (scope.kind === "assigned" && !scope.teacherId) return emptyPage(query);
+): Promise<PageResult<TeacherRosterDto>> {
+  if (scope.kind === "assigned" && !scope.teacherId) return emptyPage<TeacherRosterDto>(query);
+  const search = textSearch(query.q);
   const where: Prisma.TeacherWhereInput = {
     schoolId,
     ...(scope.kind === "assigned" && scope.teacherId ? { id: scope.teacherId } : {}),
-    ...(query.q
-      ? { OR: [{ name: textSearch(query.q) }, { nip: textSearch(query.q) }, { nuptk: textSearch(query.q) }] }
+    ...(search
+      ? { OR: [{ name: search }, { nip: search }, { nuptk: search }, { email: search }, { user: { is: { email: search } } }] }
       : {}),
   };
-  const [rows, total] = await Promise.all([
+  if (scope.kind === "assigned") {
+    const [rows, total] = await Promise.all([
+      prisma.teacher.findMany({
+        where,
+        include: teacherUserInclude(schoolId),
+        orderBy: { name: "asc" },
+        ...pageWindow(query),
+      }),
+      prisma.teacher.count({ where }),
+    ]);
+    return { items: rows.map(rosterFromTeacher), total, page: query.page, pageSize: query.pageSize };
+  }
+
+  const [profiles, accounts] = await Promise.all([
     prisma.teacher.findMany({
       where,
       include: teacherUserInclude(schoolId),
       orderBy: { name: "asc" },
-      ...pageWindow(query),
     }),
-    prisma.teacher.count({ where }),
+    prisma.user.findMany({
+      where: {
+        isActive: true,
+        teacher: { is: null },
+        assignments: {
+          some: { schoolId, isActive: true, role: { code: { in: [...TEACHING_ROLE_LIST] } } },
+        },
+        NOT: { assignments: { some: { isActive: true, role: { code: "SYSTEM_OWNER" } } } },
+        ...(search ? { OR: [{ name: search }, { email: search }] } : {}),
+      },
+      select: {
+        id: true,
+        name: true,
+        email: true,
+        isActive: true,
+        assignments: {
+          where: { schoolId, isActive: true, role: { code: { in: [...TEACHING_ROLE_LIST] } } },
+          select: { role: { select: { code: true } } },
+        },
+      },
+      orderBy: { name: "asc" },
+    }),
   ]);
-  return { items: rows.map(toTeacher), total, page: query.page, pageSize: query.pageSize };
+  const items = [...profiles.map(rosterFromTeacher), ...accounts.map((account) => rosterFromAccount(schoolId, account))]
+    .sort((left, right) => left.name.localeCompare(right.name, "id") || left.id.localeCompare(right.id));
+  const start = (query.page - 1) * query.pageSize;
+  return { items: items.slice(start, start + query.pageSize), total: items.length, page: query.page, pageSize: query.pageSize };
 }
 
 export async function assertUniqueNip(prisma: PrismaClient, schoolId: string, nip: string | null, exceptId?: string) {
@@ -264,9 +335,29 @@ export async function listStudents(
   query: PageQuery,
 ): Promise<PageResult<StudentDto>> {
   if (scope.kind === "assigned" && scope.classIds.length === 0) return emptyPage(query);
+  if (query.classId && scope.kind === "assigned" && !scope.classIds.includes(query.classId)) return emptyPage(query);
+  if (query.concentrationId) {
+    const concentration = await prisma.expertiseConcentration.findFirst({
+      where: { id: query.concentrationId, schoolId, isActive: true },
+      select: { id: true },
+    });
+    if (!concentration) return emptyPage(query);
+  }
+  if (query.classId && query.concentrationId) {
+    const linked = await prisma.schoolClass.findFirst({
+      where: { id: query.classId, schoolId, concentrationId: query.concentrationId },
+      select: { id: true },
+    });
+    if (!linked) return emptyPage(query);
+  }
   const where: Prisma.StudentWhereInput = {
     schoolId,
-    ...(scope.kind === "assigned" ? { classId: { in: scope.classIds } } : {}),
+    ...(query.classId
+      ? { classId: query.classId }
+      : scope.kind === "assigned"
+        ? { classId: { in: scope.classIds } }
+        : {}),
+    ...(query.concentrationId ? { class: { is: { schoolId, concentrationId: query.concentrationId } } } : {}),
     ...(query.q
       ? { OR: [{ name: textSearch(query.q) }, { nisn: textSearch(query.q) }, { nis: textSearch(query.q) }] }
       : {}),
@@ -274,7 +365,23 @@ export async function listStudents(
   const [rows, total] = await Promise.all([
     prisma.student.findMany({
       where,
-      include: { class: { select: { name: true } }, concentration: { select: { name: true } } },
+      select: {
+        id: true,
+        schoolId: true,
+        nisn: true,
+        nis: true,
+        name: true,
+        gender: true,
+        birthPlace: true,
+        birthDate: true,
+        email: true,
+        phone: true,
+        classId: true,
+        concentrationId: true,
+        isActive: true,
+        class: { select: { name: true } },
+        concentration: { select: { name: true } },
+      },
       orderBy: { name: "asc" },
       ...pageWindow(query),
     }),
@@ -362,6 +469,169 @@ export async function updateStudent(
   } catch (error) {
     rethrowKnown(error, "NISN atau NIS sudah digunakan.");
   }
+}
+
+type StudentTransitionInput = {
+  mode: "PROMOTE" | "GRADUATE";
+  sourceClassId: string;
+  targetClassId?: string;
+  graduationYear?: number;
+  studentIds: string[];
+};
+
+export async function transitionStudents(
+  prisma: PrismaClient,
+  auth: AuthState,
+  schoolId: string,
+  input: StudentTransitionInput,
+  meta: RequestMeta,
+) {
+  const source = await ownedRow(
+    prisma.schoolClass.findFirst({ where: { id: input.sourceClassId, schoolId }, select: { id: true } }),
+    "Kelas asal tidak ditemukan di sekolah ini.",
+  );
+  let target: { id: string; concentrationId: string | null } | null = null;
+  if (input.mode === "PROMOTE") {
+    const targetClassId = input.targetClassId;
+    if (!targetClassId) throw new AppError(400, "VALIDATION_ERROR", "Rombel tujuan wajib diisi.");
+    target = await ownedRow(
+      prisma.schoolClass.findFirst({
+        where: { id: targetClassId, schoolId },
+        select: { id: true, concentrationId: true },
+      }),
+      "Kelas tujuan tidak ditemukan di sekolah ini.",
+    );
+  }
+
+  const ordered: string[] = [];
+  const seen = new Set<string>();
+  for (const studentId of input.studentIds) {
+    if (seen.has(studentId)) continue;
+    seen.add(studentId);
+    ordered.push(studentId);
+  }
+
+  const rows = await prisma.student.findMany({
+    where: { schoolId, id: { in: ordered } },
+    select: {
+      id: true,
+      name: true,
+      nisn: true,
+      classId: true,
+      isActive: true,
+      class: { select: { name: true } },
+      concentration: { select: { name: true } },
+    },
+  });
+  const byId = new Map(rows.map((row) => [row.id, row]));
+  const failed: Array<{ studentId: string; name: string | null; reason: string }> = [];
+  const ready: typeof rows = [];
+  for (const studentId of ordered) {
+    const row = byId.get(studentId);
+    if (!row) {
+      failed.push({ studentId, name: null, reason: "Siswa tidak ditemukan di sekolah ini." });
+      continue;
+    }
+    if (row.classId !== source.id) {
+      failed.push({ studentId, name: row.name, reason: "Siswa tidak berada di kelas asal. Pemrosesan ganda dicegah." });
+      continue;
+    }
+    if (input.mode === "GRADUATE" && !row.isActive) {
+      failed.push({ studentId, name: row.name, reason: "Siswa sudah tidak aktif." });
+      continue;
+    }
+    ready.push(row);
+  }
+
+  const succeeded: Array<{ studentId: string; name: string }> = [];
+  if (ready.length > 0) {
+    await prisma.$transaction(async (tx) => {
+      for (const row of ready) {
+        const updated = await tx.student.updateMany({
+          where: {
+            id: row.id,
+            schoolId,
+            classId: source.id,
+            ...(input.mode === "GRADUATE" ? { isActive: true } : {}),
+          },
+          data: target
+            ? {
+                classId: target.id,
+                ...(target.concentrationId ? { concentrationId: target.concentrationId } : {}),
+                isActive: true,
+              }
+            : { classId: null, isActive: false },
+        });
+        if (updated.count !== 1) {
+          failed.push({ studentId: row.id, name: row.name, reason: "Siswa tidak berada di kelas asal. Pemrosesan ganda dicegah." });
+          continue;
+        }
+        if (input.mode === "GRADUATE") {
+          await linkGraduatedAlumni(tx, auth, schoolId, row, input.graduationYear ?? new Date().getUTCFullYear(), meta);
+        }
+        await writeAudit(tx, {
+          schoolId,
+          actorId: auth.userId,
+          action: input.mode === "PROMOTE" ? "STUDENT_PROMOTED" : "STUDENT_GRADUATED",
+          entityType: "Student",
+          entityId: row.id,
+          metadata: {
+            sourceClassId: source.id,
+            targetClassId: target?.id ?? null,
+            graduationYear: input.mode === "GRADUATE" ? (input.graduationYear ?? null) : null,
+            nisn: input.mode === "GRADUATE" ? row.nisn : null,
+          },
+          ipAddress: meta.ipAddress,
+          userAgent: meta.userAgent,
+        });
+        succeeded.push({ studentId: row.id, name: row.name });
+      }
+    }, { timeout: 20_000 });
+  }
+
+  return { succeeded, failed };
+}
+
+async function linkGraduatedAlumni(
+  tx: Prisma.TransactionClient,
+  auth: AuthState,
+  schoolId: string,
+  student: { id: string; name: string; nisn: string; class: { name: string } | null; concentration: { name: string } | null },
+  graduationYear: number,
+  meta: RequestMeta,
+) {
+  const alumniName = student.name.slice(0, 160);
+  const majorName = (student.concentration?.name || student.class?.name || "Umum").slice(0, 120);
+  const existing = await tx.alumniTracer.findFirst({
+    where: { schoolId, studentId: student.id, graduationYear },
+    select: { id: true },
+  });
+  const tracer = existing ?? await tx.alumniTracer.create({
+    data: {
+      schoolId,
+      studentId: student.id,
+      alumniName,
+      graduationYear,
+      majorName,
+      status: "BELUM_BEKERJA",
+    },
+    select: { id: true },
+  });
+  const linked = await tx.auditLog.findFirst({
+    where: { schoolId, action: "ALUMNI_TRACER_FROM_GRADUATION", entityType: "Student", entityId: student.id },
+    select: { id: true },
+  });
+  if (linked) return;
+  await writeAudit(tx, {
+    schoolId,
+    actorId: auth.userId,
+    action: "ALUMNI_TRACER_FROM_GRADUATION",
+    entityType: "Student",
+    entityId: student.id,
+    metadata: { tracerId: tracer.id, nisn: student.nisn, graduationYear, majorName },
+    ipAddress: meta.ipAddress,
+    userAgent: meta.userAgent,
+  });
 }
 
 export async function deleteStudent(prisma: PrismaClient, auth: AuthState, schoolId: string, id: string, meta: RequestMeta) {

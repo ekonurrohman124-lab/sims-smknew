@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { NavLink, useLocation, useNavigate } from "react-router-dom";
+import { academicNavItems, showsAcademicGroup, usesWakakurAcademicNav } from "../../lib/academicNav.ts";
 import { canCoordinate, isPrincipal, isSchoolAdmin, isWakakur } from "../../lib/access.ts";
 import { useAuth } from "../../lib/auth.tsx";
 import type { PortalId } from "../../lib/portal.tsx";
@@ -109,6 +110,42 @@ function adminGroups(showImport: boolean, showPolicy: boolean, showUsers: boolea
   ];
 }
 
+function placeAcademicGroup(groups: Group[], academicItems: Leaf[]): Group[] {
+  if (academicItems.length === 0 || groups.some((group) => group.id === "akademik")) return groups;
+  const paths = new Set(academicItems.flatMap((item) => (item.kind === "link" ? [item.to] : [])));
+  const stripped = groups
+    .map((group) => ({ ...group, items: group.items.filter((item) => item.kind !== "link" || !paths.has(item.to)) }))
+    .filter((group) => group.items.length > 0);
+  const akademik: Group = { id: "akademik", label: "Akademik", icon: "book", items: academicItems };
+  const afterSchool = stripped.findIndex((group) => group.id === "sekolah");
+  const index = afterSchool >= 0 ? afterSchool + 1 : 1;
+  return [...stripped.slice(0, index), akademik, ...stripped.slice(index)];
+}
+
+function wakakurGroups(showPolicy: boolean, academicItems: Leaf[]): Group[] {
+  const groups: Group[] = [
+    { id: "beranda", label: "Dashboard", icon: "home", items: [{ kind: "link", to: "/", label: "Beranda", end: true }] },
+  ];
+  if (academicItems.length > 0) {
+    groups.push({ id: "akademik", label: "Akademik", icon: "book", items: academicItems });
+  }
+  groups.push({
+    id: "kurikulum",
+    label: "Kurikulum",
+    icon: "curriculum",
+    items: [
+      { kind: "link", to: "/kurikulum", label: "Kurikulum" },
+      ...(showPolicy ? [{ kind: "link" as const, to: "/pengaturan-nilai", label: "Pengaturan Nilai" }] : []),
+      ...(showPolicy ? [{ kind: "link" as const, to: "/pengaturan-absensi", label: "Kelengkapan Absensi" }] : []),
+      { kind: "link", to: "/pembelajaran", label: "TP & Lingkup Materi" },
+      { kind: "link", to: "/wali-kelas", label: "Wali Kelas" },
+      { kind: "link", to: "/nilai/penerimaan", label: "Penerimaan Nilai" },
+      { kind: "link", to: "/validasi-rapor", label: "Validasi Rapor" },
+    ],
+  });
+  return groups;
+}
+
 const guruGroups: Group[] = [
   { id: "guru-beranda", label: "Beranda", icon: "home", items: [{ kind: "link", to: "/guru/beranda", label: "Dashboard Guru", end: true }] },
   {
@@ -117,6 +154,7 @@ const guruGroups: Group[] = [
     icon: "learn",
     items: [
       { kind: "link", to: "/guru/kelas", label: "Kelas Saya" },
+      { kind: "link", to: "/kalender-pendidikan", label: "Kalender Pendidikan" },
       { kind: "link", to: "/pembelajaran", label: "TP & Lingkup Materi" },
     ],
   },
@@ -163,7 +201,7 @@ const guruGroups: Group[] = [
 
 const waliGroups: Group[] = [
   { id: "wali-beranda", label: "Beranda", icon: "home", items: [{ kind: "link", to: "/wali/beranda", label: "Dashboard Wali Kelas", end: true }] },
-  { id: "wali-kelas", label: "Kelas Perwalian", icon: "class", items: [{ kind: "link", to: "/wali/penerimaan", label: "Penerimaan Nilai" }, { kind: "link", to: "/wali/monitoring-nilai", label: "Monitoring Nilai" }, { kind: "link", to: "/wali/persiapan-rapor", label: "Persiapan Rapor" }, { kind: "link", to: "/wali/pratinjau-rapor", label: "Pratinjau Rapor" }, { kind: "link", to: "/wali/pemeriksaan-rapor", label: "Pemeriksaan Rapor" }, { kind: "link", to: "/wali/catatan-wali", label: "Catatan Wali Kelas" }, { kind: "link", to: "/wali/deskripsi-capaian", label: "Deskripsi Capaian" }, { kind: "link", to: "/wali/rekap-absensi", label: "Rekap Absensi Mapel" }, { kind: "link", to: "/wali/absensi-harian", label: "Absensi Harian" }, { kind: "link", to: "/wali/nilai-akhir", label: "Nilai Akhir" }, { kind: "link", to: "/wali/rekap-nilai", label: "Rekap Nilai Akhir" }] },
+  { id: "wali-kelas", label: "Kelas Perwalian", icon: "class", items: [{ kind: "link", to: "/kalender-pendidikan", label: "Kalender Pendidikan" }, { kind: "link", to: "/wali/penerimaan", label: "Penerimaan Nilai" }, { kind: "link", to: "/wali/monitoring-nilai", label: "Monitoring Nilai" }, { kind: "link", to: "/wali/persiapan-rapor", label: "Persiapan Rapor" }, { kind: "link", to: "/wali/pratinjau-rapor", label: "Pratinjau Rapor" }, { kind: "link", to: "/wali/pemeriksaan-rapor", label: "Pemeriksaan Rapor" }, { kind: "link", to: "/wali/catatan-wali", label: "Catatan Wali Kelas" }, { kind: "link", to: "/wali/deskripsi-capaian", label: "Deskripsi Capaian" }, { kind: "link", to: "/wali/rekap-absensi", label: "Rekap Absensi Mapel" }, { kind: "link", to: "/wali/absensi-harian", label: "Absensi Harian" }, { kind: "link", to: "/wali/nilai-akhir", label: "Nilai Akhir" }, { kind: "link", to: "/wali/rekap-nilai", label: "Rekap Nilai Akhir" }] },
   {
     id: "wali-akun",
     label: "Akun",
@@ -200,7 +238,15 @@ export function Sidebar({
   const showImport = isSchoolAdmin(user, schoolId) || canCoordinate(user, schoolId);
   const showPolicy = canCoordinate(user, schoolId);
   const showUsers = isSchoolAdmin(user, schoolId);
-  const groups = portal === "guru" ? guruGroups : portal === "wali" ? waliGroups : adminGroups(showImport, showPolicy, showUsers, isWakakur(user, schoolId), isPrincipal(user, schoolId));
+  const academicItems: Leaf[] = academicNavItems(user, schoolId).map((item) => ({ kind: "link", to: item.to, label: item.label }));
+  const baseGroups = portal === "guru"
+    ? guruGroups
+    : portal === "wali"
+      ? waliGroups
+      : usesWakakurAcademicNav(user, schoolId)
+        ? wakakurGroups(showPolicy, academicItems)
+        : adminGroups(showImport, showPolicy, showUsers, isWakakur(user, schoolId), isPrincipal(user, schoolId));
+  const groups = portal === "admin" && showsAcademicGroup(user, schoolId) ? placeAcademicGroup(baseGroups, academicItems) : baseGroups;
   const activeGroup = groups.find((group) => group.items.some((item) => isCurrent(location.pathname, item)))?.id ?? groups[0]?.id ?? "";
   const [opened, setOpened] = useState(activeGroup);
 

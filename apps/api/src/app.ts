@@ -3,7 +3,7 @@ import cors from "@fastify/cors";
 import helmet from "@fastify/helmet";
 import multipart from "@fastify/multipart";
 import rateLimit from "@fastify/rate-limit";
-import type { PrismaClient } from "@prisma/client";
+import { Prisma, type PrismaClient } from "@prisma/client";
 import Fastify, { type FastifyError } from "fastify";
 import { config } from "./config.ts";
 import { isAppError } from "./lib/errors.ts";
@@ -106,6 +106,16 @@ export async function buildApp(options: BuildAppOptions) {
     if (statusCode === 429) {
       return reply.status(429).send({
         error: { code: "RATE_LIMITED", message: MSG.rateLimited },
+      });
+    }
+
+    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2022") {
+      request.log.error({ code: error.code }, "struktur tabel belum sesuai dengan klien aplikasi");
+      return reply.status(500).send({
+        error: {
+          code: "SCHEMA_MISMATCH",
+          message: "Struktur data belum sesuai dengan aplikasi. Data tidak diubah. Pembaruan database perlu disetujui terlebih dahulu.",
+        },
       });
     }
 

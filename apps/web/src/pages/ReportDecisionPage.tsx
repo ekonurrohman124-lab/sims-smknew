@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ReportPreviewSheet, type PreviewStudent } from "../components/report/ReportPreviewSheet.tsx";
 import { ApiClientError, api } from "../lib/api.ts";
 import { useSchoolScope } from "../lib/school.tsx";
@@ -39,6 +39,7 @@ export function ReportDecisionPage({ mode }: { mode: "validation" | "endorsement
   const [reason, setReason] = useState("");
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
+  const batchLock = useRef(false);
   const title = mode === "validation" ? "Validasi Rapor" : "Pengesahan Rapor";
   const path = mode === "validation" ? "report-validations" : "report-endorsements";
 
@@ -72,14 +73,19 @@ export function ReportDecisionPage({ mode }: { mode: "validation" | "endorsement
   const visible = filtered.slice((safePage - 1) * pageSize, safePage * pageSize);
 
   async function decideBatch() {
-    if (!schoolId || view !== "queue") return;
-    const readyRows = filtered.filter((r) => !r.stale && r.printStatus === "SIAP_CETAK");
+    if (!schoolId || view !== "queue" || batchLock.current) return;
+    const readyRows = filtered.filter((row) => !row.stale && row.printStatus === "SIAP_CETAK" && row.status !== "DISAHKAN");
+    const blocked = filtered.length - readyRows.length;
     if (readyRows.length === 0) {
-      setMessage("Tidak ada rapor yang siap disetujui/disahkan secara massal.");
+      setMessage(blocked > 0 ? `Pengesahan massal: berhasil 0, ditolak ${blocked}, gagal 0. Rapor yang belum lengkap atau berubah tidak diproses.` : "Tidak ada rapor pada daftar ini.");
       return;
     }
+    batchLock.current = true;
     setBusy(true);
-    let ok = 0;
+    let succeeded = 0;
+    let rejected = blocked;
+    let failed = 0;
+    const notes: string[] = [];
     const decision = mode === "validation" ? "approve" : "endorse";
     for (const item of readyRows) {
       try {
@@ -87,12 +93,19 @@ export function ReportDecisionPage({ mode }: { mode: "validation" | "endorsement
           method: "POST",
           body: JSON.stringify({ studentId: item.studentId, academicPeriodId: item.academicPeriodId, decision }),
         });
-        ok++;
-      } catch {}
+        succeeded += 1;
+      } catch (error: unknown) {
+        const text = error instanceof ApiClientError ? error.message : "Tidak dapat terhubung ke server.";
+        if (notes.length < 3) notes.push(`${item.name}: ${text}`);
+        if (error instanceof ApiClientError && (error.status === 409 || error.status === 400 || error.status === 404)) rejected += 1;
+        else failed += 1;
+      }
     }
-    setBusy(false);
+    const summary = `Pengesahan massal: berhasil ${succeeded}, ditolak ${rejected}, gagal ${failed}.`;
+    setMessage(notes.length > 0 ? `${summary} ${notes.join("; ")}` : summary);
     setSelected(null);
-    setMessage(`${ok} dari ${readyRows.length} rapor siap cetak berhasil ${mode === "validation" ? "divalidasi Wakakur" : "disahkan Kepala Sekolah"}.`);
+    batchLock.current = false;
+    setBusy(false);
     load();
   }
 
@@ -138,6 +151,11 @@ export function ReportDecisionPage({ mode }: { mode: "validation" | "endorsement
           <option value="SIAP">Data masih sesuai</option>
           <option value="BERUBAH">Data berubah</option>
         </select>
+        {view === "queue" ? (
+          <button type="button" className="h-8 rounded-lg bg-slate-900 px-3 text-sm font-semibold text-white disabled:opacity-50" disabled={busy} onClick={() => void decideBatch()}>
+            {mode === "validation" ? "Setujui yang siap" : "Sahkan yang siap"}
+          </button>
+        ) : null}
       </div>
       <div className="overflow-x-auto rounded-lg border border-slate-200">
         <table className="min-w-full text-left text-sm">

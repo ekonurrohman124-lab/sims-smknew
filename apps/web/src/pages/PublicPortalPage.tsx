@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { AnonymousReportDto, PpdbApplicantDto, PpdbStatus, WhistleblowerCategory, WhistleblowerStatus } from "@sims/shared";
 import { ApiClientError, api } from "../lib/api.ts";
 import { enqueueOfflineRequest, flushOfflineQueue, getOfflineQueue } from "../lib/offline-sync.ts";
@@ -27,6 +27,7 @@ export function PublicPortalPage({ mode }: { mode: "ppdb" | "whistleblower" }) {
 
   const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
+  const submitLock = useRef(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
 
@@ -56,13 +57,17 @@ export function PublicPortalPage({ mode }: { mode: "ppdb" | "whistleblower" }) {
     setError(null);
     try {
       if (mode === "ppdb") {
-        const data = await api<PpdbApplicantDto[]>(`/schools/${schoolId}/ppdb/applicants`);
+        const data = await api<PpdbApplicantDto[]>(`/api/v1/schools/${schoolId}/ppdb/applicants`);
         setApplicants(data);
       } else {
-        const data = await api<AnonymousReportDto[]>(`/schools/${schoolId}/whistleblower/reports`);
+        const data = await api<AnonymousReportDto[]>(`/api/v1/schools/${schoolId}/whistleblower/reports`);
         setReports(data);
       }
     } catch (err) {
+      if (mode === "whistleblower" && err instanceof ApiClientError && err.status === 403) {
+        setReports([]);
+        return;
+      }
       setError(err instanceof ApiClientError ? err.message : "Gagal memuat data portal.");
     } finally {
       setLoading(false);
@@ -77,39 +82,45 @@ export function PublicPortalPage({ mode }: { mode: "ppdb" | "whistleblower" }) {
 
   async function handleRegisterPpdb(e: React.FormEvent) {
     e.preventDefault();
-    if (!schoolId) return;
+    if (!schoolId || submitLock.current) return;
+    const score = averageScore.trim() === "" ? undefined : Number(averageScore);
+    if (fullName.trim().length < 2 || originSchool.trim().length < 2 || chosenMajor.trim().length < 2 || parentPhone.trim().length < 6) {
+      setError("Lengkapi nama, asal sekolah, jurusan, dan telepon orang tua sebelum mengirim.");
+      return;
+    }
+    if (nisn.trim().length > 20 || (score !== undefined && (!Number.isFinite(score) || score < 0 || score > 100))) {
+      setError("NISN atau nilai rata-rata tidak valid.");
+      return;
+    }
+    submitLock.current = true;
     setBusy("ppdb-submit");
     setError(null);
     setSuccess(null);
 
     const payload = {
-      fullName,
+      fullName: fullName.trim(),
       nisn: nisn.trim() || undefined,
-      originSchool,
-      chosenMajor,
-      parentPhone,
-      averageScore: averageScore ? Number(averageScore) : undefined,
+      originSchool: originSchool.trim(),
+      chosenMajor: chosenMajor.trim(),
+      parentPhone: parentPhone.trim(),
+      averageScore: score,
     };
 
     if (!navigator.onLine) {
       enqueueOfflineRequest({
-        endpoint: `/schools/${schoolId}/ppdb/applicants`,
+        endpoint: `/api/v1/schools/${schoolId}/ppdb/applicants`,
         method: "POST",
         body: JSON.stringify(payload),
-        label: `PPDB: ${fullName}`,
+        label: `PPDB: ${payload.fullName}`,
       });
-      setFullName("");
-      setNisn("");
-      setOriginSchool("");
-      setParentPhone("");
-      setAverageScore("");
-      setSuccess("Perangkat sedang luring. Pendaftaran PPDB disimpan ke antrean sinkronisasi lokal.");
+      setError("Belum tersimpan di server. Pendaftaran masuk antrean dan baru berhasil setelah tersinkron.");
+      submitLock.current = false;
       setBusy(null);
       return;
     }
 
     try {
-      const created = await api<PpdbApplicantDto>(`/schools/${schoolId}/ppdb/applicants`, {
+      const created = await api<PpdbApplicantDto>(`/api/v1/schools/${schoolId}/ppdb/applicants`, {
         method: "POST",
         body: JSON.stringify(payload),
       });
@@ -123,6 +134,7 @@ export function PublicPortalPage({ mode }: { mode: "ppdb" | "whistleblower" }) {
     } catch (err) {
       setError(err instanceof ApiClientError ? err.message : "Gagal mendaftarkan calon siswa.");
     } finally {
+      submitLock.current = false;
       setBusy(null);
     }
   }
@@ -132,7 +144,7 @@ export function PublicPortalPage({ mode }: { mode: "ppdb" | "whistleblower" }) {
     setBusy(applicantId);
     setError(null);
     try {
-      await api<PpdbApplicantDto>(`/schools/${schoolId}/ppdb/applicants/${applicantId}`, {
+      await api<PpdbApplicantDto>(`/api/v1/schools/${schoolId}/ppdb/applicants/${applicantId}`, {
         method: "PATCH",
         body: JSON.stringify({ status }),
       });
@@ -147,7 +159,16 @@ export function PublicPortalPage({ mode }: { mode: "ppdb" | "whistleblower" }) {
 
   async function handleSubmitReport(e: React.FormEvent) {
     e.preventDefault();
-    if (!schoolId) return;
+    if (!schoolId || submitLock.current) return;
+    if (description.trim().length < 10 || description.trim().length > 2000) {
+      setError("Uraian laporan harus 10 sampai 2000 karakter.");
+      return;
+    }
+    if (incidentPlace.trim().length > 160) {
+      setError("Lokasi kejadian terlalu panjang.");
+      return;
+    }
+    submitLock.current = true;
     setBusy("report-submit");
     setError(null);
     setSuccess(null);
@@ -155,25 +176,24 @@ export function PublicPortalPage({ mode }: { mode: "ppdb" | "whistleblower" }) {
     const payload = {
       category,
       incidentPlace: incidentPlace.trim() || undefined,
-      description,
+      description: description.trim(),
     };
 
     if (!navigator.onLine) {
       enqueueOfflineRequest({
-        endpoint: `/schools/${schoolId}/whistleblower/reports`,
+        endpoint: `/api/v1/schools/${schoolId}/whistleblower/reports`,
         method: "POST",
         body: JSON.stringify(payload),
         label: "Laporan Anti-Bullying",
       });
-      setIncidentPlace("");
-      setDescription("");
-      setSuccess("Laporan anonim tersimpan luring dan akan otomatis dikirim saat perangkat kembali daring.");
+      setError("Belum tersimpan di server. Laporan masuk antrean dan baru berhasil setelah tersinkron.");
+      submitLock.current = false;
       setBusy(null);
       return;
     }
 
     try {
-      const created = await api<AnonymousReportDto>(`/schools/${schoolId}/whistleblower/reports`, {
+      const created = await api<AnonymousReportDto>(`/api/v1/schools/${schoolId}/whistleblower/reports`, {
         method: "POST",
         body: JSON.stringify(payload),
       });
@@ -185,6 +205,7 @@ export function PublicPortalPage({ mode }: { mode: "ppdb" | "whistleblower" }) {
     } catch (err) {
       setError(err instanceof ApiClientError ? err.message : "Gagal mengirim laporan anonim.");
     } finally {
+      submitLock.current = false;
       setBusy(null);
     }
   }
@@ -194,7 +215,7 @@ export function PublicPortalPage({ mode }: { mode: "ppdb" | "whistleblower" }) {
     setBusy(reportId);
     setError(null);
     try {
-      await api<AnonymousReportDto>(`/schools/${schoolId}/whistleblower/reports/${reportId}`, {
+      await api<AnonymousReportDto>(`/api/v1/schools/${schoolId}/whistleblower/reports/${reportId}`, {
         method: "PATCH",
         body: JSON.stringify({
           status,

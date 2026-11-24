@@ -408,3 +408,93 @@ export async function reviseTeacherProfile(
   });
   return { item: await findTeacherDto(prisma, schoolId, current.id), created: false, temporaryPassword: null };
 }
+
+type LinkTeacherProfileInput = {
+  userId: string;
+  name: string;
+  gender: "LAKI_LAKI" | "PEREMPUAN";
+  nip: string | null;
+  nuptk: string | null;
+  phone: string | null;
+};
+
+function uniqueConflict(error: unknown): boolean {
+  return typeof error === "object" && error !== null && "code" in error && (error as { code: string }).code === "P2002";
+}
+
+export async function linkTeacherProfile(
+  prisma: PrismaClient,
+  auth: AuthState,
+  schoolId: string,
+  input: LinkTeacherProfileInput,
+  meta: RequestMeta,
+): Promise<TeacherAccountResult> {
+  const user = await prisma.user.findFirst({
+    where: {
+      id: input.userId,
+      isActive: true,
+      assignments: { some: { schoolId, isActive: true, role: { code: { in: ["GURU_MAPEL", "WALI_KELAS"] } } } },
+      NOT: { assignments: { some: { isActive: true, role: { code: "SYSTEM_OWNER" } } } },
+    },
+    select: {
+      id: true,
+      email: true,
+      passwordHash: true,
+      teacher: { select: { id: true, schoolId: true } },
+      assignments: { where: { isActive: true }, select: { id: true, schoolId: true, role: { select: { code: true } } } },
+    },
+  });
+  if (!user) throw new AppError(404, "NOT_FOUND", "Akun guru sekolah ini tidak ditemukan.");
+  if (user.teacher) {
+    if (user.teacher.schoolId !== schoolId) duplicate("Akun ini sudah tertaut ke guru di sekolah lain.");
+    return { item: await findTeacherDto(prisma, schoolId, user.teacher.id), created: false, temporaryPassword: null };
+  }
+
+  await assertUniqueNip(prisma, schoolId, input.nip);
+  const beforeRoles = user.assignments.map((item) => `${item.id}:${item.schoolId}:${item.role.code}`).join("|");
+  let teacherId: string;
+  try {
+    const created = await prisma.teacher.create({
+      data: {
+        schoolId,
+        userId: user.id,
+        name: input.name.trim(),
+        gender: input.gender,
+        email: user.email,
+        nip: input.nip,
+        nuptk: input.nuptk,
+        phone: input.phone,
+        isActive: true,
+      },
+      select: { id: true },
+    });
+    teacherId = created.id;
+  } catch (error) {
+    if (!uniqueConflict(error)) throw error;
+    const existing = await prisma.teacher.findFirst({ where: { userId: user.id }, select: { id: true, schoolId: true } });
+    if (existing?.schoolId === schoolId) {
+      return { item: await findTeacherDto(prisma, schoolId, existing.id), created: false, temporaryPassword: null };
+    }
+    duplicate(existing ? "Akun ini sudah tertaut ke guru di sekolah lain." : "NIP sudah digunakan di sekolah ini.");
+  }
+
+  const after = await prisma.user.findUniqueOrThrow({
+    where: { id: user.id },
+    select: {
+      email: true,
+      passwordHash: true,
+      assignments: { where: { isActive: true }, select: { id: true, schoolId: true, role: { select: { code: true } } } },
+    },
+  });
+  const afterRoles = after.assignments.map((item) => `${item.id}:${item.schoolId}:${item.role.code}`).join("|");
+  if (after.email !== user.email || after.passwordHash !== user.passwordHash || afterRoles !== beforeRoles) {
+    throw new AppError(409, "ACCOUNT_UNCHANGED", "Akun guru tidak boleh berubah saat profil dihubungkan.");
+  }
+  await auditChange(prisma, auth, meta, {
+    schoolId,
+    action: "TEACHER_ACCOUNT_LINKED",
+    entityType: "Teacher",
+    entityId: teacherId,
+  });
+  return { item: await findTeacherDto(prisma, schoolId, teacherId), created: true, temporaryPassword: null };
+}

@@ -24,9 +24,10 @@ import {
 } from "./common.ts";
 import type { DataScope } from "./scope.ts";
 import type { RequestMeta } from "../../lib/tenant.ts";
+import { rangesOverlap } from "./kaldik-lampung.ts";
 
 type YearInput = { name: string; startDate: string; endDate: string; isActive: boolean };
-type SemesterInput = YearInput & { academicYearId: string; semesterKind: "GANJIL" | "GENAP" };
+type SemesterInput = YearInput & { academicYearId: string; semesterKind: "GANJIL" | "GENAP"; confirmUsedChange?: boolean };
 type NamedInput = { code: string; name: string; isActive: boolean };
 type ClassInput = {
   academicYearId: string;
@@ -47,6 +48,45 @@ async function clearActiveYear(tx: Prisma.TransactionClient, schoolId: string, e
     where: { schoolId, isActive: true, ...(exceptId ? { id: { not: exceptId } } : {}) },
     data: { isActive: false },
   });
+}
+
+async function assertSemesterWindow(
+  prisma: PrismaClient,
+  schoolId: string,
+  input: SemesterInput,
+  exceptId?: string,
+) {
+  const periods = await prisma.academicPeriod.findMany({
+    where: { schoolId, ...(exceptId ? { id: { not: exceptId } } : {}) },
+    select: { academicYearId: true, semesterKind: true, startDate: true, endDate: true },
+  });
+  if (periods.some((period) => period.academicYearId === input.academicYearId && period.semesterKind === input.semesterKind)) {
+    inUse("Semester dengan jenis yang sama sudah ada pada tahun pelajaran ini.");
+  }
+  const start = input.startDate;
+  const end = input.endDate;
+  if (periods.some((period) => rangesOverlap(start, end, toDateOnly(period.startDate), toDateOnly(period.endDate)))) {
+    inUse("Periode semester bertabrakan dengan semester lain.");
+  }
+}
+
+async function semesterUsageLocks(prisma: PrismaClient, id: string): Promise<string[]> {
+  const [teachings, homerooms, finals, submissions, reports, notes, meetings, daily] = await Promise.all([
+    prisma.teachingAssignment.count({ where: { academicPeriodId: id } }),
+    prisma.homeroomAssignment.count({ where: { academicPeriodId: id } }),
+    prisma.gradeFinalResult.count({ where: { teachingAssignment: { academicPeriodId: id } } }),
+    prisma.gradeSubmission.count({ where: { teachingAssignment: { academicPeriodId: id } } }),
+    prisma.reportCardWorkflow.count({ where: { academicPeriodId: id } }),
+    prisma.homeroomNote.count({ where: { academicPeriodId: id } }),
+    prisma.attendanceMeeting.count({ where: { teachingAssignment: { academicPeriodId: id } } }),
+    prisma.dailyAttendance.count({ where: { homeroom: { academicPeriodId: id } } }),
+  ]);
+  const reasons: string[] = [];
+  if (teachings + homerooms > 0) reasons.push("penugasan");
+  if (finals + submissions > 0) reasons.push("nilai");
+  if (reports + notes > 0) reasons.push("rapor");
+  if (meetings + daily > 0) reasons.push("presensi");
+  return reasons;
 }
 
 async function clearActivePeriod(tx: Prisma.TransactionClient, schoolId: string, exceptId?: string) {
@@ -111,6 +151,23 @@ export async function createYear(
   }
 }
 
+async function yearIdentityLocks(prisma: PrismaClient, id: string): Promise<string[]> {
+  const [classes, curricula, finalGrades, submissions, reports, notes] = await Promise.all([
+    prisma.schoolClass.count({ where: { academicYearId: id } }),
+    prisma.curriculum.count({ where: { academicYearId: id } }),
+    prisma.gradeFinalResult.count({ where: { teachingAssignment: { academicPeriod: { academicYearId: id } } } }),
+    prisma.gradeSubmission.count({ where: { teachingAssignment: { academicPeriod: { academicYearId: id } } } }),
+    prisma.reportCardWorkflow.count({ where: { academicYearId: id } }),
+    prisma.homeroomNote.count({ where: { academicYearId: id } }),
+  ]);
+  const reasons: string[] = [];
+  if (classes > 0) reasons.push("kelas");
+  if (curricula > 0) reasons.push("kurikulum");
+  if (finalGrades + submissions > 0) reasons.push("nilai");
+  if (reports + notes > 0) reasons.push("rapor");
+  return reasons;
+}
+
 export async function updateYear(
   prisma: PrismaClient,
   auth: AuthState,
@@ -119,7 +176,18 @@ export async function updateYear(
   input: YearInput,
   meta: RequestMeta,
 ) {
-  await ownedRow(prisma.academicYear.findFirst({ where: { id, schoolId }, select: { id: true } }), "Tahun pelajaran tidak ditemukan.");
+  const current = await ownedRow(
+    prisma.academicYear.findFirst({ where: { id, schoolId }, select: { id: true, name: true, startDate: true, endDate: true } }),
+    "Tahun pelajaran tidak ditemukan.",
+  );
+  const identityChanged =
+    current.name !== input.name || toDateOnly(current.startDate) !== input.startDate || toDateOnly(current.endDate) !== input.endDate;
+  if (identityChanged) {
+    const reasons = await yearIdentityLocks(prisma, id);
+    if (reasons.length > 0) {
+      inUse(`Nama dan tanggal tidak diubah karena tahun pelajaran sudah dipakai oleh ${reasons.join(", ")}. Status aktif tetap dapat diperbarui. Data kelas, nilai, dan rapor tidak dihapus.`);
+    }
+  }
   try {
     await prisma.$transaction(async (tx) => {
       if (input.isActive) await clearActiveYear(tx, schoolId, id);
@@ -203,6 +271,7 @@ export async function createSemester(
     prisma.academicYear.findFirst({ where: { id: input.academicYearId, schoolId }, select: { id: true } }),
     "Tahun pelajaran tidak ditemukan di sekolah ini.",
   );
+  await assertSemesterWindow(prisma, schoolId, input);
   try {
     const period = await prisma.$transaction(async (tx) => {
       if (input.isActive) await clearActivePeriod(tx, schoolId);
@@ -236,11 +305,31 @@ export async function updateSemester(
   input: SemesterInput,
   meta: RequestMeta,
 ) {
-  await ownedRow(prisma.academicPeriod.findFirst({ where: { id, schoolId }, select: { id: true } }), "Semester tidak ditemukan.");
+  const current = await ownedRow(
+    prisma.academicPeriod.findFirst({
+      where: { id, schoolId },
+      select: { id: true, name: true, academicYearId: true, semesterKind: true, startDate: true, endDate: true, isActive: true },
+    }),
+    "Semester tidak ditemukan.",
+  );
+  const identityChanged =
+    current.name !== input.name
+    || current.academicYearId !== input.academicYearId
+    || current.semesterKind !== input.semesterKind
+    || toDateOnly(current.startDate) !== input.startDate
+    || toDateOnly(current.endDate) !== input.endDate
+    || current.isActive !== input.isActive;
+  if (identityChanged && !input.confirmUsedChange) {
+    const reasons = await semesterUsageLocks(prisma, id);
+    if (reasons.length > 0) {
+      inUse(`Tanggal dan status tidak diubah karena semester sudah dipakai oleh ${reasons.join(", ")}. Perubahan membutuhkan konfirmasi eksplisit. Data siswa, nilai, presensi, dan rapor tidak dihapus.`);
+    }
+  }
   await ownedRow(
     prisma.academicYear.findFirst({ where: { id: input.academicYearId, schoolId }, select: { id: true } }),
     "Tahun pelajaran tidak ditemukan di sekolah ini.",
   );
+  await assertSemesterWindow(prisma, schoolId, input, id);
   try {
     await prisma.$transaction(async (tx) => {
       if (input.isActive) await clearActivePeriod(tx, schoolId, id);

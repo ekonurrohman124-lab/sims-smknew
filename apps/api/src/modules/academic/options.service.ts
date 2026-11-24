@@ -37,7 +37,12 @@ export async function academicOptions(
       : prisma.teacher.findMany({ where: { ...teacherWhere, isActive: true }, orderBy: { name: "asc" }, take: TAKE }),
     scope.kind === "assigned" && scope.classIds.length === 0
       ? Promise.resolve([])
-      : prisma.schoolClass.findMany({ where: { ...classWhere, isActive: true }, orderBy: { name: "asc" }, take: TAKE }),
+      : prisma.schoolClass.findMany({
+          where: { ...classWhere, isActive: true },
+          select: { id: true, name: true, concentrationId: true, academicYear: { select: { isActive: true } } },
+          orderBy: [{ gradeLevel: "asc" }, { name: "asc" }],
+          take: TAKE,
+        }),
     scope.kind === "assigned" && scope.subjectIds.length === 0
       ? Promise.resolve([])
       : prisma.subject.findMany({ where: { ...subjectWhere, isActive: true }, orderBy: { name: "asc" }, take: TAKE }),
@@ -88,7 +93,12 @@ export async function academicOptions(
     programs: programs.map((item) => ({ id: item.id, label: `${item.code} · ${item.name}` })),
     concentrations: concentrations.map((item) => ({ id: item.id, label: `${item.code} · ${item.name}` })),
     teachers: teachers.map((item) => ({ id: item.id, label: item.nip ? `${item.name} · ${item.nip}` : item.name })),
-    classes: classes.map((item) => ({ id: item.id, label: item.name })),
+    classes: classes.map((item) => ({
+      id: item.id,
+      label: item.name,
+      concentrationId: item.concentrationId,
+      academicYearActive: item.academicYear.isActive,
+    })),
     subjects: subjects.map((item) => ({ id: item.id, label: `${item.code} · ${item.name}` })),
     members: [...memberMap.values()].map(({ id, label }) => ({ id, label })),
     curricula: curricula.map((item) => ({ id: item.id, label: `${item.code} · ${item.name} · ${item.academicYear.name}` })),

@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import type { ImportCommitDto, ImportPreviewDto, ImportPreviewRow } from "@sims/shared";
+import type { ImportClassCount, ImportClassMatch, ImportCommitDto, ImportPreviewDto, ImportPreviewRow, ImportReasonCount, ImportRowStatus, ImportSheetSummary } from "@sims/shared";
 import { ApiClientError, api, apiBlob } from "../../lib/api.ts";
 
 const MAX_BYTES = 2 * 1024 * 1024;
@@ -12,42 +12,74 @@ type StudentImportDialogProps = {
   onImported: (message: string) => void;
 };
 
+type StatusFilter = "SEMUA" | ImportRowStatus;
+
+const STATUS_LABEL: Record<string, string> = {
+  READY_CREATE: "Siap dibuat",
+  READY_UPDATE: "Siap diperbarui",
+  NEEDS_REVIEW: "Perlu diperiksa",
+  DUPLICATE: "Duplikat",
+  REJECTED: "Ditolak",
+  SKIPPED: "Dilewati",
+  VALID: "Valid",
+  DUPLIKAT: "Duplikat",
+  GAGAL: "Gagal",
+};
+
 function csvCell(value: string): string {
   const safe = /^[\d]+$/.test(value) ? `="${value}"` : value;
   if (/[",\n\r]/.test(safe)) return `"${safe.replace(/"/g, '""')}"`;
   return safe;
 }
 
-function downloadErrors(rows: ImportPreviewRow[]) {
-  const header = ["baris", "nama", "nisn", "nis", "kelas", "status", "alasan"];
+function rowStatus(row: ImportPreviewRow): string {
+  return row.status ?? (row.valid ? "READY_CREATE" : "REJECTED");
+}
+
+function downloadClassMap(matches: ImportClassMatch[]) {
+  const header = ["sheet", "nama_sumber", "status", "kelas_master", "tingkat", "jumlah_siswa"];
+  const lines = matches.map((item) => [
+    item.sheet,
+    item.sourceName,
+    item.status === "MATCHED" ? "Cocok" : item.status === "AMBIGUOUS" ? "Ambigu" : "Belum tersedia",
+    item.className ?? "",
+    item.gradeLevel === null ? "" : String(item.gradeLevel),
+    String(item.studentCount),
+  ]);
+  const csv = `\uFEFF${[header, ...lines].map((line) => line.map(csvCell).join(",")).join("\n")}\n`;
+  const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = "pemetaan-kelas-siswa.csv";
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
+function downloadReport(rows: ImportPreviewRow[]) {
+  const header = ["sheet", "baris", "nama", "nisn", "nis", "kelas", "status", "alasan"];
   const lines = rows
-    .filter((row) => !row.valid)
+    .filter((row) => rowStatus(row) !== "READY_CREATE" && rowStatus(row) !== "READY_UPDATE")
     .map((row) => [
+      row.sheet ?? row.data.sheet ?? "",
       String(row.rowNumber),
       row.data.nama ?? "",
       row.data.nisn ?? "",
       row.data.nis ?? "",
       row.data.kelas ?? "",
-      row.status === "DUPLIKAT" ? "Duplikat" : "Gagal",
+      STATUS_LABEL[rowStatus(row)] ?? rowStatus(row),
       row.errors.join("; "),
     ]);
   const csv = `\uFEFF${[header, ...lines].map((line) => line.map(csvCell).join(",")).join("\n")}\n`;
   const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
   const link = document.createElement("a");
   link.href = url;
-  link.download = "laporan-kesalahan-siswa.csv";
+  link.download = "laporan-pemeriksaan-siswa.csv";
   link.click();
   URL.revokeObjectURL(url);
 }
 
-function statusText(row: ImportPreviewRow, committed: boolean): string {
-  if (committed && row.valid) return "Berhasil";
-  if (row.status === "DUPLIKAT") return "Duplikat";
-  if (!row.valid) return "Gagal";
-  return "Valid";
-}
-
 export function StudentImportDialog({ schoolId, years, operational, onClose, onImported }: StudentImportDialogProps) {
+  const [file, setFile] = useState<File | null>(null);
   const [yearId, setYearId] = useState("");
   const [fileName, setFileName] = useState("");
   const [preview, setPreview] = useState<ImportPreviewDto | null>(null);
@@ -55,33 +87,33 @@ export function StudentImportDialog({ schoolId, years, operational, onClose, onI
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [query, setQuery] = useState("");
-  const [statusFilter, setStatusFilter] = useState<"SEMUA" | "VALID" | "DUPLIKAT" | "GAGAL">("SEMUA");
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>("SEMUA");
+  const [confirming, setConfirming] = useState(false);
+  const [confirmClasses, setConfirmClasses] = useState(false);
 
   const rows = result?.rows ?? preview?.rows ?? [];
-  const summary = result
-    ? {
-        total: result.totalCount ?? result.rows.length,
-        valid: result.created,
-        duplicate: result.duplicateCount ?? 0,
-        failed: result.failedCount ?? 0,
-        validLabel: "Berhasil",
-      }
-    : {
-        total: preview?.totalCount ?? preview?.rows.length ?? 0,
-        valid: preview?.validCount ?? 0,
-        duplicate: preview?.duplicateCount ?? 0,
-        failed: preview?.failedCount ?? 0,
-        validLabel: "Valid",
-      };
+  const sheets: ImportSheetSummary[] = preview?.sheets ?? [];
+  const classCounts: ImportClassCount[] = preview?.classCounts ?? [];
+  const unmapped = preview?.unmappedColumns ?? [];
+  const summary = {
+    total: result?.totalCount ?? preview?.totalCount ?? rows.length,
+    create: result ? result.created : preview?.createCount ?? 0,
+    update: result ? result.updated ?? 0 : preview?.updateCount ?? 0,
+    review: result?.reviewCount ?? preview?.reviewCount ?? 0,
+    duplicate: result?.duplicateCount ?? preview?.duplicateCount ?? 0,
+    failed: result?.failedCount ?? preview?.failedCount ?? 0,
+    skipped: result?.skippedCount ?? preview?.skippedCount ?? 0,
+  };
+  const classMatches: ImportClassMatch[] = preview?.classMatches ?? [];
+  const reasonCounts: ImportReasonCount[] = preview?.reasonCounts ?? [];
+  const missingClasses = classMatches.filter((item) => item.status === "MISSING" && item.gradeLevel !== null && item.gradeLevel >= 10 && item.gradeLevel <= 13);
+  const reviewRows = rows.filter((row) => rowStatus(row) === "NEEDS_REVIEW");
   const visible = useMemo(() => {
     const needle = query.trim().toLowerCase();
     return rows.filter((row) => {
-      const status = row.status ?? (row.valid ? "VALID" : "GAGAL");
-      if (statusFilter === "VALID" && !row.valid) return false;
-      if (statusFilter === "DUPLIKAT" && status !== "DUPLIKAT") return false;
-      if (statusFilter === "GAGAL" && (status !== "GAGAL" || row.valid)) return false;
+      if (statusFilter !== "SEMUA" && rowStatus(row) !== statusFilter) return false;
       if (!needle) return true;
-      const haystack = [row.data.nama, row.data.nisn, row.data.nis, row.data.kelas, row.errors.join(" ")].join(" ").toLowerCase();
+      const haystack = [row.sheet, row.data.sheet, row.data.nama, row.data.nisn, row.data.nis, row.data.kelas, row.errors.join(" ")].join(" ").toLowerCase();
       return haystack.includes(needle);
     });
   }, [query, rows, statusFilter]);
@@ -119,7 +151,9 @@ export function StudentImportDialog({ schoolId, years, operational, onClose, onI
     setBusy(true);
     setError("");
     setResult(null);
+    setConfirming(false);
     setFileName(file.name);
+    setFile(file);
     const body = new FormData();
     if (yearId) body.append("academicYearId", yearId);
     body.append("file", file);
@@ -131,6 +165,36 @@ export function StudentImportDialog({ schoolId, years, operational, onClose, onI
       setPreview(null);
       setError(caught instanceof ApiClientError ? caught.message : "Berkas gagal diperiksa.");
     } finally {
+      setBusy(false);
+    }
+  }
+
+  async function createMissingClasses() {
+    if (!file || !yearId || missingClasses.length === 0) return;
+    setBusy(true);
+    setError("");
+    try {
+      for (const item of missingClasses) {
+        try {
+          await api(`/api/v1/schools/${schoolId}/classes`, {
+            method: "POST",
+            body: JSON.stringify({
+              academicYearId: yearId,
+              concentrationId: null,
+              name: item.sourceName,
+              gradeLevel: item.gradeLevel,
+              capacity: 36,
+              isActive: true,
+            }),
+          });
+        } catch (caught) {
+          if (!(caught instanceof ApiClientError) || caught.status !== 409) throw caught;
+        }
+      }
+      setConfirmClasses(false);
+      await upload(file);
+    } catch (caught) {
+      setError(caught instanceof ApiClientError ? caught.message : "Kelas gagal dibuat.");
       setBusy(false);
     }
   }
@@ -149,17 +213,20 @@ export function StudentImportDialog({ schoolId, years, operational, onClose, onI
       });
       setResult(response);
       setPreview({
+        ...preview,
         rows: response.rows,
-        validCount: response.rows.filter((row) => row.valid).length,
-        invalidCount: response.rows.filter((row) => !row.valid).length,
+        validCount: response.created + (response.updated ?? 0),
+        invalidCount: response.rows.length - response.created - (response.updated ?? 0),
         totalCount: response.totalCount,
         duplicateCount: response.duplicateCount,
         failedCount: response.failedCount,
+        reviewCount: response.reviewCount,
+        skippedCount: response.skippedCount,
+        createCount: response.created,
+        updateCount: response.updated ?? 0,
       });
-      const parts = [`${response.created} siswa berhasil diimpor`];
-      if ((response.duplicateCount ?? 0) > 0) parts.push(`${response.duplicateCount} duplikat dilewati`);
-      if ((response.failedCount ?? 0) > 0) parts.push(`${response.failedCount} baris gagal`);
-      onImported(`${parts.join(". ")}.`);
+      setConfirming(false);
+      onImported(`${response.created} siswa baru disimpan. ${response.updated ?? 0} siswa diperbarui. ${response.skippedCount ?? 0} baris dilewati. ${response.failedCount ?? 0} baris ditolak.`);
     } catch (caught) {
       setError(caught instanceof ApiClientError ? caught.message : "Impor gagal disimpan.");
     } finally {
@@ -173,7 +240,7 @@ export function StudentImportDialog({ schoolId, years, operational, onClose, onI
         <div className="flex items-start justify-between gap-3">
           <div>
             <h2 id="student-import-title" className="text-lg font-semibold text-slate-900">Import Excel</h2>
-            <p className="mt-1 text-sm text-slate-500">Download Template, pilih berkas, periksa pratinjau, lalu konfirmasi simpan. Hanya baris valid yang disimpan. Siswa lama tidak diubah dan akun login tidak dibuat.</p>
+            <p className="mt-1 text-sm text-slate-500">Berkas sekolah berlembar banyak diperiksa dulu. Hanya baris siap dibuat atau siap diperbarui yang disimpan setelah konfirmasi. Siswa tidak dihapus, kelas tidak dipindahkan, dan nilai serta rapor tidak diubah.</p>
           </div>
           <button type="button" className="rounded-lg border border-slate-300 px-3 py-1.5 text-sm" onClick={onClose}>Tutup</button>
         </div>
@@ -188,6 +255,7 @@ export function StudentImportDialog({ schoolId, years, operational, onClose, onI
                 setYearId(event.target.value);
                 setPreview(null);
                 setResult(null);
+                setConfirming(false);
                 setError("");
               }}
             >
@@ -211,33 +279,107 @@ export function StudentImportDialog({ schoolId, years, operational, onClose, onI
             />
           </label>
         </div>
-        <p className="mt-2 text-xs text-slate-500">XLSX atau CSV UTF-8, maksimal 2 MB dan 1.000 baris. NISN dan NIS dibaca sebagai teks. Kolom Kelas hanya menerima kelas yang sudah ada pada tahun pelajaran yang dipilih.</p>
+        <p className="mt-2 text-xs text-slate-500">XLSX atau CSV UTF-8, maksimal 2 MB dan 4.000 baris. NIS, NISN, NIK, dan nomor KK dibaca sebagai teks. Sheet rekap, mutasi, dan statistik tidak dijadikan daftar siswa aktif. Kelas baru tidak dibuat.</p>
         {fileName ? <p className="mt-2 text-sm text-slate-600">Berkas: {fileName}</p> : null}
         {error ? <p role="alert" className="mt-3 rounded-xl bg-red-50 px-3 py-2 text-sm text-red-700">{error}</p> : null}
-        {result ? <p role="status" className="mt-3 rounded-xl bg-teal-50 px-3 py-2 text-sm text-teal-800">{summary.valid} siswa berhasil diimpor. {summary.duplicate} duplikat dilewati. {summary.failed} baris gagal.</p> : null}
+        {result ? <p role="status" className="mt-3 rounded-xl bg-teal-50 px-3 py-2 text-sm text-teal-800">{summary.create} berhasil disimpan. {summary.update} diperbarui. {summary.skipped} dilewati. {summary.failed} ditolak. {summary.review} tetap menunggu pemeriksaan. {summary.duplicate} duplikat tidak disimpan ulang.</p> : null}
         {preview || result ? (
           <div className="mt-4 space-y-3">
-            <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+            <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 lg:grid-cols-7">
               <p className="rounded-xl bg-slate-50 px-3 py-2 text-sm"><span className="block text-slate-500">Total</span><span className="text-lg font-semibold">{summary.total}</span></p>
-              <p className="rounded-xl bg-teal-50 px-3 py-2 text-sm"><span className="block text-teal-800">{summary.validLabel}</span><span className="text-lg font-semibold">{summary.valid}</span></p>
+              <p className="rounded-xl bg-teal-50 px-3 py-2 text-sm"><span className="block text-teal-800">{result ? "Berhasil" : "Siap dibuat"}</span><span className="text-lg font-semibold">{summary.create}</span></p>
+              <p className="rounded-xl bg-teal-50 px-3 py-2 text-sm"><span className="block text-teal-800">{result ? "Diperbarui" : "Siap diperbarui"}</span><span className="text-lg font-semibold">{summary.update}</span></p>
+              <p className="rounded-xl bg-amber-50 px-3 py-2 text-sm"><span className="block text-amber-800">Perlu diperiksa</span><span className="text-lg font-semibold">{summary.review}</span></p>
               <p className="rounded-xl bg-amber-50 px-3 py-2 text-sm"><span className="block text-amber-800">Duplikat</span><span className="text-lg font-semibold">{summary.duplicate}</span></p>
-              <p className="rounded-xl bg-red-50 px-3 py-2 text-sm"><span className="block text-red-800">Gagal</span><span className="text-lg font-semibold">{summary.failed}</span></p>
+              <p className="rounded-xl bg-red-50 px-3 py-2 text-sm"><span className="block text-red-800">Ditolak</span><span className="text-lg font-semibold">{summary.failed}</span></p>
+              <p className="rounded-xl bg-slate-50 px-3 py-2 text-sm"><span className="block text-slate-500">Dilewati</span><span className="text-lg font-semibold">{summary.skipped}</span></p>
             </div>
+            {preview?.profilePersistence === "unavailable" ? <p role="status" className="rounded-xl bg-amber-50 px-3 py-2 text-sm text-amber-950">Nama ayah, nama ibu, NIK, nomor KK, sekolah asal, agama, alamat, dan keterangan tetap ada di hasil pemeriksaan. Nilai itu belum dapat disimpan sebelum pembaruan database disetujui.</p> : null}
+            {unmapped.length > 0 ? <p role="status" className="rounded-xl bg-amber-50 px-3 py-2 text-sm text-amber-950">Kolom belum sesuai tujuan penyimpanan dan tetap ditampilkan untuk verifikasi: {unmapped.join(", ")}.</p> : null}
+            {sheets.length > 0 ? (
+              <div className="rounded-2xl border border-slate-200 p-3">
+                <p className="text-sm font-semibold text-slate-800">Pratinjau sheet</p>
+                <ul className="mt-2 grid gap-1 sm:grid-cols-2">
+                  {sheets.map((sheet) => (
+                    <li key={sheet.name} className="text-sm text-slate-600">{sheet.name}: {sheet.role === "students" ? `${sheet.rowCount} baris siswa` : sheet.role === "historical" ? "historis, bukan siswa aktif" : "non-data"} — {sheet.reason}</li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
+            {classMatches.length > 0 ? (
+              <div className="rounded-2xl border border-slate-200 p-3">
+                <p className="text-sm font-semibold text-slate-800">Pemetaan kelas</p>
+                <p className="mt-1 text-xs text-slate-500">Nama sheet dipertahankan. Variasi singkatan hanya dipakai untuk mencari kelas yang sudah ada. Kelas yang belum ada tidak dibuat sebelum konfirmasi, dan siswa lama tidak dipindahkan.</p>
+                {!yearId ? <p role="status" className="mt-2 text-sm text-amber-900">Pilih tahun pelajaran 2026/2027. Jika tahun itu belum ada, buat dulu di menu Tahun Pelajaran.</p> : null}
+                <ul className="mt-2 max-h-40 space-y-1 overflow-auto text-sm">
+                  {classMatches.map((item) => (
+                    <li key={item.sheet} className="text-slate-700">
+                      {item.sourceName}: {item.studentCount} siswa — {item.status === "MATCHED" ? `cocok dengan ${item.className}` : item.status === "AMBIGUOUS" ? "ambigu, tidak dipetakan" : "belum tersedia"}
+                    </li>
+                  ))}
+                </ul>
+                {confirmClasses ? (
+                  <div className="mt-3 rounded-xl bg-amber-50 p-3 text-sm text-amber-950">
+                    <p>Buat {missingClasses.length} kelas yang belum tersedia pada tahun pelajaran yang dipilih. Nama kelas mengikuti nama sheet.</p>
+                    <div className="mt-2 flex justify-end gap-2">
+                      <button type="button" className="rounded-xl border border-slate-300 bg-white px-3 py-1.5 text-sm" disabled={busy} onClick={() => setConfirmClasses(false)}>Batal</button>
+                      <button type="button" className="rounded-xl bg-teal-800 px-3 py-1.5 text-sm font-semibold text-white disabled:opacity-50" disabled={busy} onClick={() => void createMissingClasses()}>{busy ? "Membuat kelas..." : "Ya, buat kelas"}</button>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    <button type="button" className="rounded-xl border border-slate-300 px-3 py-1.5 text-sm font-semibold disabled:opacity-50" disabled={!yearId || busy || missingClasses.length === 0} onClick={() => setConfirmClasses(true)}>Konfirmasi kelas yang belum ada</button>
+                    <button type="button" className="rounded-xl border border-slate-300 px-3 py-1.5 text-sm" onClick={() => downloadClassMap(classMatches)}>Unduh pemetaan kelas</button>
+                  </div>
+                )}
+              </div>
+            ) : null}
+            {reasonCounts.length > 0 ? (
+              <div className="rounded-2xl border border-slate-200 p-3">
+                <p className="text-sm font-semibold text-slate-800">Alasan pemeriksaan</p>
+                <ul className="mt-2 space-y-1 text-sm text-slate-700">
+                  {reasonCounts.slice(0, 8).map((item) => (
+                    <li key={`${item.status}-${item.reason}`}>{item.count} baris · {STATUS_LABEL[item.status] ?? item.status}: {item.reason}</li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
+            {classCounts.length > 0 ? (
+              <div className="rounded-2xl border border-slate-200 p-3">
+                <p className="text-sm font-semibold text-slate-800">Jumlah data per kelas</p>
+                <ul className="mt-2 flex flex-wrap gap-2">
+                  {classCounts.map((item) => <li key={item.className} className="rounded-full bg-slate-100 px-3 py-1 text-xs text-slate-700">{item.className}: {item.count}</li>)}
+                </ul>
+              </div>
+            ) : null}
+            {reviewRows.length > 0 ? (
+              <div className="rounded-2xl border border-amber-200 bg-amber-50 p-3">
+                <p className="text-sm font-semibold text-amber-950">Siswa yang memerlukan pemeriksaan ({reviewRows.length})</p>
+                <ul className="mt-2 max-h-32 space-y-1 overflow-auto text-sm text-amber-950">
+                  {reviewRows.slice(0, 30).map((row) => (
+                    <li key={`${row.sheet ?? ""}-${row.rowNumber}`}>{row.data.nama || "Tanpa nama"} · {row.data.kelas || "kelas belum ada"} · {row.errors.join(" ")}</li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
             <div className="flex flex-col gap-2 sm:flex-row">
               <input className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm sm:max-w-xs" value={query} placeholder="Cari nama, NISN, NIS, atau kelas" aria-label="Cari hasil pratinjau" onChange={(event) => setQuery(event.target.value)} />
-              <select className="rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm" aria-label="Filter status pratinjau" value={statusFilter} onChange={(event) => setStatusFilter(event.target.value as typeof statusFilter)}>
+              <select className="rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm" aria-label="Filter status pratinjau" value={statusFilter} onChange={(event) => setStatusFilter(event.target.value as StatusFilter)}>
                 <option value="SEMUA">Semua status</option>
-                <option value="VALID">Valid</option>
-                <option value="DUPLIKAT">Duplikat</option>
-                <option value="GAGAL">Gagal</option>
+                <option value="READY_CREATE">Siap dibuat</option>
+                <option value="READY_UPDATE">Siap diperbarui</option>
+                <option value="NEEDS_REVIEW">Perlu diperiksa</option>
+                <option value="DUPLICATE">Duplikat</option>
+                <option value="REJECTED">Ditolak</option>
+                <option value="SKIPPED">Dilewati</option>
               </select>
-              <button type="button" className="rounded-xl border border-slate-300 px-4 py-2 text-sm disabled:opacity-50" disabled={rows.every((row) => row.valid)} onClick={() => downloadErrors(rows)}>Unduh laporan kesalahan</button>
+              <button type="button" className="rounded-xl border border-slate-300 px-4 py-2 text-sm disabled:opacity-50" disabled={rows.every((row) => row.valid)} onClick={() => downloadReport(rows)}>Unduh laporan pemeriksaan</button>
             </div>
             <div className="max-h-80 overflow-auto rounded-2xl border border-slate-200">
-              <table className="min-w-[760px] w-full text-left text-sm">
+              <table className="min-w-[860px] w-full text-left text-sm">
                 <thead className="sticky top-0 bg-slate-50 text-slate-500">
                   <tr>
-                    <th className="px-3 py-2 font-medium">Baris</th>
+                    <th className="px-3 py-2 font-medium">Sheet</th>
                     <th className="px-3 py-2 font-medium">Nama</th>
                     <th className="px-3 py-2 font-medium">NISN</th>
                     <th className="px-3 py-2 font-medium">NIS</th>
@@ -249,24 +391,34 @@ export function StudentImportDialog({ schoolId, years, operational, onClose, onI
                 <tbody>
                   {visible.length === 0 ? <tr><td className="px-3 py-4 text-slate-500" colSpan={7}>Tidak ada baris pada filter ini.</td></tr> : null}
                   {visible.map((row) => (
-                    <tr key={row.rowNumber} className="border-t border-slate-100">
-                      <td className="px-3 py-2">{row.rowNumber}</td>
+                    <tr key={`${row.sheet ?? ""}-${row.rowNumber}`} className="border-t border-slate-100">
+                      <td className="px-3 py-2">{row.sheet || row.data.sheet || "-"}</td>
                       <td className="px-3 py-2">{row.data.nama || "-"}</td>
                       <td className="px-3 py-2 font-mono">{row.data.nisn || "-"}</td>
                       <td className="px-3 py-2 font-mono">{row.data.nis?.trim() ? row.data.nis : "Belum diisi"}</td>
                       <td className="px-3 py-2">{row.data.kelas || "-"}</td>
-                      <td className="px-3 py-2">{statusText(row, Boolean(result))}</td>
-                      <td className="px-3 py-2 text-red-700">{row.errors.join(" ")}</td>
+                      <td className="px-3 py-2">{STATUS_LABEL[rowStatus(row)] ?? rowStatus(row)}</td>
+                      <td className="px-3 py-2 text-slate-700">{row.errors.join(" ")}</td>
                     </tr>
                   ))}
                 </tbody>
               </table>
             </div>
-            <div className="flex justify-end">
-              <button type="button" className="rounded-xl bg-teal-800 px-4 py-2 text-sm font-semibold text-white disabled:opacity-50" disabled={!operational || busy || Boolean(result) || (preview?.validCount ?? 0) === 0} onClick={() => void commit()}>
-                {busy ? "Menyimpan..." : "Konfirmasi Simpan"}
-              </button>
-            </div>
+            {confirming ? (
+              <div className="rounded-2xl border border-teal-200 bg-teal-50 p-3 text-sm text-teal-950">
+                <p>Simpan {summary.create} siswa baru dan perbarui {summary.update} siswa. Baris yang perlu diperiksa, duplikat, ditolak, dan dilewati tidak ditulis. Penempatan kelas siswa yang sudah ada tidak diubah.</p>
+                <div className="mt-3 flex justify-end gap-2">
+                  <button type="button" className="rounded-xl border border-slate-300 bg-white px-4 py-2 text-sm" disabled={busy} onClick={() => setConfirming(false)}>Batal</button>
+                  <button type="button" className="rounded-xl bg-teal-800 px-4 py-2 text-sm font-semibold text-white disabled:opacity-50" disabled={busy} onClick={() => void commit()}>{busy ? "Menyimpan..." : "Ya, simpan"}</button>
+                </div>
+              </div>
+            ) : (
+              <div className="flex justify-end">
+                <button type="button" className="rounded-xl bg-teal-800 px-4 py-2 text-sm font-semibold text-white disabled:opacity-50" disabled={!operational || busy || Boolean(result) || (preview?.validCount ?? 0) === 0} onClick={() => setConfirming(true)}>
+                  Konfirmasi Simpan
+                </button>
+              </div>
+            )}
           </div>
         ) : null}
       </div>
