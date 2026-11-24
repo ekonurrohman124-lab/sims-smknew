@@ -38,3 +38,5 @@ local.properties
 key.properties
 keystore.properties
 
+
+*.apk
